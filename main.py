@@ -68,6 +68,9 @@ if __name__ == '__main__':
         optimizer = optim.Adam(model.parameters(),
                                lr=config.lr[0], weight_decay=0.005)
 
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=args.max_epoch, eta_min=1e-6)
+
     test_info = {"epoch": [], "test_AUC": [], "test_PR_AUC": []}
     best_AUC = -1
     output_path = ''   # put your own path here
@@ -78,10 +81,6 @@ if __name__ == '__main__':
             total=args.max_epoch,
             dynamic_ncols=True
     ):
-        if step > 1 and config.lr[step - 1] != config.lr[step - 2]:
-            for param_group in optimizer.param_groups:
-                param_group["lr"] = config.lr[step - 1]
-
         if (step - 1) % len(train_nloader) == 0:
             loadern_iter = iter(train_nloader)
 
@@ -89,6 +88,7 @@ if __name__ == '__main__':
             loadera_iter = iter(train_aloader)
 
         train(loadern_iter, loadera_iter, model, args.batch_size, optimizer, viz, device)
+        scheduler.step()
 
         auc, pr_auc, fpr, tpr, precision, recall = test(test_loader, model, args, viz, device)
         test_info["epoch"].append(step)
