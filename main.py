@@ -89,15 +89,16 @@ if __name__ == '__main__':
 
         train(loadern_iter, loadera_iter, model, args.batch_size, optimizer, viz, device)
 
-        if step % 5 == 0 and step > 200:
+        auc = test(test_loader, model, args, viz, device)
+        test_info["epoch"].append(step)
+        test_info["test_AUC"].append(auc)
 
-            auc = test(test_loader, model, args, viz, device)
-            test_info["epoch"].append(step)
-            test_info["test_AUC"].append(auc)
-
-            if test_info["test_AUC"][-1] > best_AUC:
-                best_AUC = test_info["test_AUC"][-1]
-                torch.save(model.state_dict(), './ckpt/' + args.model_name + '{}-i3d.pkl'.format(step))
-                save_best_record(test_info, os.path.join(output_path, '{}-step-AUC.txt'.format(step)))
+        if auc > best_AUC:
+            best_AUC = auc
+            torch.save(model.state_dict(),
+                       './ckpt/' + args.model_name + 'best-i3d.pkl')
+            save_best_record(test_info,
+                             os.path.join(output_path, args.model_name + 'best-AUC.txt'))
+            print(f'\n  *** New best AUC: {best_AUC:.4f}  (step {step}) ***')
 
     torch.save(model.state_dict(), './ckpt/' + args.model_name + 'final.pkl')
