@@ -27,17 +27,13 @@ def test(dataloader, model, args, viz, device):
         print("Pred length:", len(pred))
 
         fpr, tpr, threshold = roc_curve(list(gt), pred)
-        np.save('fpr.npy', fpr)
-        np.save('tpr.npy', tpr)
         rec_auc = auc(fpr, tpr)
         print('auc : ' + str(rec_auc))
 
         precision, recall, th = precision_recall_curve(list(gt), pred)
         pr_auc = auc(recall, precision)
-        np.save('precision.npy', precision)
-        np.save('recall.npy', recall)
         viz.plot_lines('pr_auc', pr_auc)
         viz.plot_lines('auc', rec_auc)
         viz.lines('scores', pred)
         viz.lines('roc', tpr, fpr)
-        return rec_auc
+        return rec_auc, fpr, tpr, precision, recall

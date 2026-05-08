@@ -1,6 +1,7 @@
 from torch.utils.data import DataLoader
 import torch.optim as optim
 import torch
+import numpy as np
 from utils import save_best_record
 from model import Model
 from dataset import Dataset
@@ -70,7 +71,7 @@ if __name__ == '__main__':
     test_info = {"epoch": [], "test_AUC": []}
     best_AUC = -1
     output_path = ''   # put your own path here
-    auc = test(test_loader, model, args, viz, device)
+    auc, _, _, _, _ = test(test_loader, model, args, viz, device)
 
     for step in tqdm(
             range(1, args.max_epoch + 1),
@@ -89,7 +90,7 @@ if __name__ == '__main__':
 
         train(loadern_iter, loadera_iter, model, args.batch_size, optimizer, viz, device)
 
-        auc = test(test_loader, model, args, viz, device)
+        auc, fpr, tpr, precision, recall = test(test_loader, model, args, viz, device)
         test_info["epoch"].append(step)
         test_info["test_AUC"].append(auc)
 
@@ -99,6 +100,10 @@ if __name__ == '__main__':
                        './ckpt/' + args.model_name + 'best-i3d.pkl')
             save_best_record(test_info,
                              os.path.join(output_path, args.model_name + 'best-AUC.txt'))
+            np.save(args.model_name + 'fpr.npy', fpr)
+            np.save(args.model_name + 'tpr.npy', tpr)
+            np.save(args.model_name + 'precision.npy', precision)
+            np.save(args.model_name + 'recall.npy', recall)
             print(f'\n  *** New best AUC: {best_AUC:.4f}  (step {step}) ***')
 
     torch.save(model.state_dict(), './ckpt/' + args.model_name + 'final.pkl')
