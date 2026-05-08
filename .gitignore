@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual env
+vadenv/
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Large data / features
+data/
+*.npy
+*.npz
+*.zip
+*.download
+
+# Outputs
+fpr.npy
+tpr.npy
+precision.npy
+recall.npy
+
+# Jupyter / misc
+.ipynb_checkpoints/
+*.bak
+ckpt/
