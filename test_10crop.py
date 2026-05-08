@@ -32,8 +32,10 @@ def test(dataloader, model, args, viz, device):
 
         precision, recall, th = precision_recall_curve(list(gt), pred)
         pr_auc = auc(recall, precision)
+        print(f'auc : {rec_auc:.4f}  |  pr_auc : {pr_auc:.4f}')
+
         viz.plot_lines('pr_auc', pr_auc)
         viz.plot_lines('auc', rec_auc)
         viz.lines('scores', pred)
         viz.lines('roc', tpr, fpr)
-        return rec_auc, fpr, tpr, precision, recall
+        return rec_auc, pr_auc, fpr, tpr, precision, recall

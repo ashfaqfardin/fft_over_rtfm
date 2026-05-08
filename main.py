@@ -68,10 +68,10 @@ if __name__ == '__main__':
         optimizer = optim.Adam(model.parameters(),
                                lr=config.lr[0], weight_decay=0.005)
 
-    test_info = {"epoch": [], "test_AUC": []}
+    test_info = {"epoch": [], "test_AUC": [], "test_PR_AUC": []}
     best_AUC = -1
     output_path = ''   # put your own path here
-    auc, _, _, _, _ = test(test_loader, model, args, viz, device)
+    auc, pr_auc, _, _, _, _ = test(test_loader, model, args, viz, device)
 
     for step in tqdm(
             range(1, args.max_epoch + 1),
@@ -90,9 +90,10 @@ if __name__ == '__main__':
 
         train(loadern_iter, loadera_iter, model, args.batch_size, optimizer, viz, device)
 
-        auc, fpr, tpr, precision, recall = test(test_loader, model, args, viz, device)
+        auc, pr_auc, fpr, tpr, precision, recall = test(test_loader, model, args, viz, device)
         test_info["epoch"].append(step)
         test_info["test_AUC"].append(auc)
+        test_info["test_PR_AUC"].append(pr_auc)
 
         if auc > best_AUC:
             best_AUC = auc
