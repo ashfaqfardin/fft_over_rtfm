@@ -1,6 +1,5 @@
-import matplotlib.pyplot as plt
 import torch
-from sklearn.metrics import auc, roc_curve, precision_recall_curve
+from sklearn.metrics import auc, roc_curve, precision_recall_curve, average_precision_score
 import numpy as np
 
 def test(dataloader, model, args, viz, device):
@@ -23,15 +22,15 @@ def test(dataloader, model, args, viz, device):
         pred = list(pred.cpu().detach().numpy())
         pred = np.repeat(np.array(pred), 16)
 
-        print("GT length:", len(gt))
-        print("Pred length:", len(pred))
-
         fpr, tpr, threshold = roc_curve(list(gt), pred)
         rec_auc = auc(fpr, tpr)
-        print('auc : ' + str(rec_auc))
 
+        # average_precision_score uses the interpolated left-Riemann sum —
+        # the standard PR-AUC definition in anomaly-detection literature.
+        # precision_recall_curve arrays are kept for saving/plotting only.
+        pr_auc = average_precision_score(list(gt), pred)
         precision, recall, th = precision_recall_curve(list(gt), pred)
-        pr_auc = auc(recall, precision)
+
         print(f'auc : {rec_auc:.4f}  |  pr_auc : {pr_auc:.4f}')
 
         viz.plot_lines('pr_auc', pr_auc)
