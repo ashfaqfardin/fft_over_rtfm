@@ -1,0 +1,173 @@
+# =============================================================================
+# VISUALISATION  (python visualize.py)
+# -----------------------------------------------------------------------------
+
+# By video index (0-based in test list)
+python visualize.py --ckpt ckpt/rtfm_ucf_best-i3d.pkl --videos 0,5,50,100
+
+# By name substring (case-insensitive, comma-separated)
+python visualize.py --ckpt ckpt/rtfm_ucf_best-i3d.pkl --names Stealing,Robbery,Shoplifting,Normal
+
+# With FFTFormer mods (must match the training run)
+python visualize.py --ckpt ckpt/rtfm_ucf_mods_1234_best-i3d.pkl --mod 1,2,3,4 --names Stealing,Normal
+
+# Custom layout and output path
+python visualize.py --ckpt ckpt/rtfm_ucf_best-i3d.pkl --videos 0,1,2,3,4,5 --cols 3 --output curves.png
+
+#  visualize.py args:
+#    --ckpt           PATH   checkpoint .pkl (required)
+#    --mod            STR    mods used at training time (default: none)
+#    --videos         STR    comma-separated 0-based video indices
+#    --names          STR    comma-separated filename substrings
+#    --output         PATH   output image file (default: score_curves.png)
+#    --cols           INT    subplots per row (default 3)
+#    --test-rgb-list  PATH   test feature list (default: list/ucf-i3d-test.list)
+#    --gt             PATH   ground-truth .npy  (default: list/gt-ucf-local.npy)
+
+# =============================================================================
+# RTFM + FFTFormer  —  CLI Command Reference
+# =============================================================================
+# All commands use:  python main.py [args]
+# Defaults (omitted args):
+#   --feature-size 2048   --batch-size 32   --max-epoch 100
+#   --lr "[0.001]*100"    --loss rtfm
+#   --smooth-weight 8e-4  --sparse-weight 8e-3
+#   --mod ""  (baseline, no FFTFormer modifications)
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# 1.  BASELINE  (no mods, default RTFM loss)
+# -----------------------------------------------------------------------------
+
+python main.py
+
+python main.py --model-name rtfm_baseline
+
+
+# -----------------------------------------------------------------------------
+# 2.  FFTFormer MODS  (incremental ablation, RTFM loss)
+# -----------------------------------------------------------------------------
+
+# Mod 1 — T-DFFN frequency gating on each PDC branch
+python main.py --mod 1
+
+# Mod 1+2 — T-DFFN + TemporalFSAS attention (replaces NonLocal)
+python main.py --mod 1,2
+
+# Mod 1+2+3 — add frequency-domain feature magnitude
+python main.py --mod 1,2,3
+
+# Mod 1+2+3+4 — full FFTFormer (FreqGated classifier head)
+python main.py --mod 1,2,3,4
+
+
+# -----------------------------------------------------------------------------
+# 3.  LOSS FUNCTION ABLATION  (best mod config: 1,2,3,4)
+# -----------------------------------------------------------------------------
+
+# Default RTFM loss  (BCE + feature-magnitude ranking)
+python main.py --mod 1,2,3,4 --loss rtfm
+
+# Sultani MIL hinge ranking loss
+python main.py --mod 1,2,3,4 --loss ranking
+
+# Focal-BCE (gamma=2) + RTFM magnitude term — handles class imbalance
+python main.py --mod 1,2,3,4 --loss focal
+
+# Cosine-margin contrastive + BCE — pushes normal/abnormal features apart
+python main.py --mod 1,2,3,4 --loss contrastive
+
+
+# -----------------------------------------------------------------------------
+# 4.  LOSS ABLATION ON BASELINE  (no mods)
+# -----------------------------------------------------------------------------
+
+python main.py --loss ranking
+python main.py --loss focal
+python main.py --loss contrastive
+
+
+# -----------------------------------------------------------------------------
+# 5.  REGULARISER WEIGHT TUNING
+# -----------------------------------------------------------------------------
+
+# Higher sparsity — forces fewer high-score segments (sparser anomalies)
+python main.py --mod 1,2,3,4 --sparse-weight 1e-2
+
+# Lower smoothness — less temporal penalty, sharper score transitions
+python main.py --mod 1,2,3,4 --smooth-weight 1e-4
+
+# Both tuned together
+python main.py --mod 1,2,3,4 --smooth-weight 5e-4 --sparse-weight 1e-2
+
+
+# -----------------------------------------------------------------------------
+# 6.  LEARNING RATE SCHEDULES
+#     (--lr takes a Python list expression; CosineAnnealingLR is applied on top)
+# -----------------------------------------------------------------------------
+
+# Warm start: higher LR for first 50 epochs, then drop
+python main.py --lr "[0.001]*50+[0.0005]*50"
+
+# Three-stage decay
+python main.py --lr "[0.001]*40+[0.0005]*30+[0.0001]*30"
+
+# Lower base LR (more stable with contrastive loss)
+python main.py --mod 1,2,3,4 --loss contrastive --lr "[0.0005]*100"
+
+
+# -----------------------------------------------------------------------------
+# 7.  EXTENDED TRAINING
+# -----------------------------------------------------------------------------
+
+python main.py --mod 1,2,3,4 --max-epoch 150
+python main.py --mod 1,2,3,4 --loss focal --max-epoch 200
+
+
+# -----------------------------------------------------------------------------
+# 8.  FULL ABLATION SUITE  (copy-paste to run all experiments sequentially)
+# -----------------------------------------------------------------------------
+
+python main.py --model-name run_baseline
+python main.py --mod 1       --model-name run_mod1
+python main.py --mod 1,2     --model-name run_mod12
+python main.py --mod 1,2,3   --model-name run_mod123
+python main.py --mod 1,2,3,4 --model-name run_mod1234
+python main.py --mod 1,2,3,4 --loss ranking     --model-name run_mod1234_ranking
+python main.py --mod 1,2,3,4 --loss focal       --model-name run_mod1234_focal
+python main.py --mod 1,2,3,4 --loss contrastive --model-name run_mod1234_contrastive
+
+
+# -----------------------------------------------------------------------------
+# 9.  ARGUMENT REFERENCE
+# -----------------------------------------------------------------------------
+#
+#  --mod            STR     Comma-separated FFTFormer mods to activate
+#                           1 = T-DFFN PDC branches
+#                           2 = TemporalFSAS attention (replaces NonLocalBlock1D)
+#                           3 = Frequency-domain feature magnitude
+#                           4 = FreqGated classifier head
+#
+#  --loss           STR     Loss function  [rtfm | ranking | focal | contrastive]
+#                           rtfm        — BCE + feature-magnitude ranking (default)
+#                           ranking     — Sultani MIL hinge  max(0, 1-s_abn+s_nor)
+#                           focal       — Focal-BCE (gamma=2) + magnitude term
+#                           contrastive — Cosine-margin + BCE
+#
+#  --smooth-weight  FLOAT   Temporal smoothness regulariser weight  (default 8e-4)
+#  --sparse-weight  FLOAT   Sparsity regulariser weight             (default 8e-3)
+#
+#  --lr             STR     Python list expression for per-epoch LR  (default [0.001]*100)
+#                           CosineAnnealingLR is applied on top of this schedule.
+#
+#  --max-epoch      INT     Training epochs  (default 100)
+#  --batch-size     INT     Bags per batch   (default 32)
+#  --feature-size   INT     Input feature dim (default 2048 for I3D)
+#  --model-name     STR     Checkpoint prefix (default rtfm_ucf)
+#  --dataset        STR     Dataset tag used for train/test split  (default ucf)
+#  --rgb-list       PATH    Training feature list file
+#  --test-rgb-list  PATH    Test feature list file
+#  --gt             PATH    Ground-truth .npy file
+#
+# =============================================================================

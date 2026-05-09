@@ -1,85 +1,139 @@
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 torch.set_default_tensor_type('torch.FloatTensor')
-from torch.nn import L1Loss
-from torch.nn import MSELoss
-
 
 
 def sparsity(arr, batch_size, lamda2):
     loss = torch.mean(torch.norm(arr, dim=0))
-    return lamda2*loss
+    return lamda2 * loss
 
 
 def smooth(arr, lamda1):
     arr2 = torch.zeros_like(arr)
     arr2[:-1] = arr[1:]
     arr2[-1] = arr[-1]
-
-    loss = torch.sum((arr2-arr)**2)
-
-    return lamda1*loss
+    return lamda1 * torch.sum((arr2 - arr) ** 2)
 
 
 def l1_penalty(var):
     return torch.mean(torch.norm(var, dim=0))
 
 
-class SigmoidMAELoss(torch.nn.Module):
+class SigmoidMAELoss(nn.Module):
     def __init__(self):
-        super(SigmoidMAELoss, self).__init__()
-        from torch.nn import Sigmoid
-        self.__sigmoid__ = Sigmoid()
-        self.__l1_loss__ = MSELoss()
+        super().__init__()
+        self.__l1_loss__ = nn.MSELoss()
 
     def forward(self, pred, target):
         return self.__l1_loss__(pred, target)
 
 
-class SigmoidCrossEntropyLoss(torch.nn.Module):
-    # Implementation Reference: http://vast.uccs.edu/~adhamija/blog/Caffe%20Custom%20Layer.html
+class SigmoidCrossEntropyLoss(nn.Module):
     def __init__(self):
-        super(SigmoidCrossEntropyLoss, self).__init__()
+        super().__init__()
 
     def forward(self, x, target):
-        tmp = 1 + torch.exp(- torch.abs(x))
-        return torch.abs(torch.mean(- x * target + torch.clamp(x, min=0) + torch.log(tmp)))
+        tmp = 1 + torch.exp(-torch.abs(x))
+        return torch.abs(torch.mean(-x * target + torch.clamp(x, min=0) + torch.log(tmp)))
 
 
-class RTFM_loss(torch.nn.Module):
-    def __init__(self, alpha, margin):
-        super(RTFM_loss, self).__init__()
-        self.alpha = alpha
+# ── Loss 1 (default): RTFM ───────────────────────────────────────────────────
+class RTFM_loss(nn.Module):
+    """Original RTFM loss: BCE on bag scores + feature-magnitude ranking term."""
+    def __init__(self, alpha=0.0001, margin=100):
+        super().__init__()
+        self.alpha  = alpha
         self.margin = margin
-        self.sigmoid = torch.nn.Sigmoid()
-        self.mae_criterion = SigmoidMAELoss()
-        self.criterion = torch.nn.BCELoss()
+        self.criterion = nn.BCELoss()
 
     def forward(self, score_normal, score_abnormal, nlabel, alabel, feat_n, feat_a):
         label = torch.cat((nlabel, alabel), 0)
-        score_abnormal = score_abnormal
-        score_normal = score_normal
+        score = torch.cat((score_normal, score_abnormal), 0).squeeze()
+        label = label.to(score.device)
+        loss_cls = self.criterion(score, label)
+        loss_abn = torch.abs(self.margin - torch.norm(torch.mean(feat_a, dim=1), p=2, dim=1))
+        loss_nor = torch.norm(torch.mean(feat_n, dim=1), p=2, dim=1)
+        loss_rtfm = torch.mean((loss_abn + loss_nor) ** 2)
+        return loss_cls + self.alpha * loss_rtfm
 
-        score = torch.cat((score_normal, score_abnormal), 0)
-        score = score.squeeze()
 
+# ── Loss 2: Ranking (Sultani MIL hinge) ──────────────────────────────────────
+class RankingLoss(nn.Module):
+    """MIL hinge ranking loss from Sultani et al. (2018).
+    Top-k abnormal segments must outscore top-k normal segments by at least `margin`.
+    """
+    def __init__(self, margin=1.0):
+        super().__init__()
+        self.margin = margin
+
+    def forward(self, score_normal, score_abnormal, nlabel, alabel, feat_n, feat_a):
+        return F.relu(self.margin - score_abnormal + score_normal).mean()
+
+
+# ── Loss 3: Focal BCE ─────────────────────────────────────────────────────────
+class FocalBCELoss(nn.Module):
+    """Focal loss (Lin et al. 2017) replacing plain BCE to handle class imbalance.
+    gamma=2 down-weights easy normal segments so training focuses on hard cases.
+    Retains the RTFM feature-magnitude term for stable convergence.
+    """
+    def __init__(self, alpha=0.0001, margin=100, gamma=2.0, eps=1e-6):
+        super().__init__()
+        self.alpha_rtfm = alpha
+        self.margin     = margin
+        self.gamma      = gamma
+        self.eps        = eps
+
+    def forward(self, score_normal, score_abnormal, nlabel, alabel, feat_n, feat_a):
+        label = torch.cat((nlabel, alabel), 0)
+        score = torch.cat((score_normal, score_abnormal), 0).squeeze()
         label = label.to(score.device)
 
-        loss_cls = self.criterion(score, label)  # BCE loss in the score space
+        pt        = torch.where(label == 1, score, 1 - score).clamp(self.eps, 1 - self.eps)
+        loss_cls  = -(((1 - pt) ** self.gamma) * torch.log(pt)).mean()
 
-        loss_abn = torch.abs(self.margin - torch.norm(torch.mean(feat_a, dim=1), p=2, dim=1))
-
-        loss_nor = torch.norm(torch.mean(feat_n, dim=1), p=2, dim=1)
-
+        loss_abn  = torch.abs(self.margin - torch.norm(torch.mean(feat_a, dim=1), p=2, dim=1))
+        loss_nor  = torch.norm(torch.mean(feat_n, dim=1), p=2, dim=1)
         loss_rtfm = torch.mean((loss_abn + loss_nor) ** 2)
-
-        loss_total = loss_cls + self.alpha * loss_rtfm
-
-        return loss_total
+        return loss_cls + self.alpha_rtfm * loss_rtfm
 
 
-def train(nloader, aloader, model, batch_size, optimizer, viz, device):
+# ── Loss 4: Contrastive ───────────────────────────────────────────────────────
+class ContrastiveLoss(nn.Module):
+    """Cosine-margin contrastive loss.
+    Forces cosine similarity between L2-normalised normal and abnormal feature
+    centroids to stay below (1 - margin), pushing the two distributions apart.
+    """
+    def __init__(self, alpha=1.0, margin=0.5):
+        super().__init__()
+        self.alpha    = alpha
+        self.margin   = margin
+        self.criterion = nn.BCELoss()
+
+    def forward(self, score_normal, score_abnormal, nlabel, alabel, feat_n, feat_a):
+        label = torch.cat((nlabel, alabel), 0)
+        score = torch.cat((score_normal, score_abnormal), 0).squeeze()
+        label = label.to(score.device)
+        loss_cls = self.criterion(score, label)
+
+        n_mean       = F.normalize(feat_n.mean(dim=1), dim=1)   # (B, F)
+        a_mean       = F.normalize(feat_a.mean(dim=1), dim=1)   # (B, F)
+        cos_sim      = (n_mean * a_mean).sum(dim=1)              # (B,)
+        loss_contrast = F.relu(cos_sim - (1.0 - self.margin)).mean()
+        return loss_cls + self.alpha * loss_contrast
+
+
+_LOSS_REGISTRY = {
+    'rtfm':        lambda: RTFM_loss(alpha=0.0001, margin=100),
+    'ranking':     lambda: RankingLoss(margin=1.0),
+    'focal':       lambda: FocalBCELoss(alpha=0.0001, margin=100, gamma=2.0),
+    'contrastive': lambda: ContrastiveLoss(alpha=1.0, margin=0.5),
+}
+
+
+def train(nloader, aloader, model, batch_size, optimizer, viz, device,
+          loss_name='rtfm', smooth_weight=8e-4, sparse_weight=8e-3):
     with torch.set_grad_enabled(True):
         model.train()
 
@@ -89,20 +143,20 @@ def train(nloader, aloader, model, batch_size, optimizer, viz, device):
         input = torch.cat((ninput, ainput), 0).to(device)
 
         score_abnormal, score_normal, feat_select_abn, feat_select_normal, feat_abn_bottom, \
-        feat_normal_bottom, scores, scores_nor_bottom, scores_nor_abn_bag, _ = model(input)  # b*32  x 2048
+        feat_normal_bottom, scores, scores_nor_bottom, scores_nor_abn_bag, _ = model(input)
 
-        scores = scores.view(batch_size * 32 * 2, -1)
-
-        scores = scores.squeeze()
+        scores    = scores.view(batch_size * 32 * 2, -1).squeeze()
         abn_scores = scores[batch_size * 32:]
 
         nlabel = nlabel[0:batch_size]
         alabel = alabel[0:batch_size]
 
-        loss_criterion = RTFM_loss(0.0001, 100)
-        loss_sparse = sparsity(abn_scores, batch_size, 8e-3)
-        loss_smooth = smooth(abn_scores, 8e-4)
-        cost = loss_criterion(score_normal, score_abnormal, nlabel, alabel, feat_select_normal, feat_select_abn) + loss_smooth + loss_sparse
+        loss_fn     = _LOSS_REGISTRY[loss_name]().to(device)
+        loss_sparse = sparsity(abn_scores, batch_size, sparse_weight)
+        loss_smooth = smooth(abn_scores, smooth_weight)
+        cost = (loss_fn(score_normal, score_abnormal, nlabel, alabel,
+                        feat_select_normal, feat_select_abn)
+                + loss_smooth + loss_sparse)
 
         viz.plot_lines('loss', cost.item())
         viz.plot_lines('smooth loss', loss_smooth.item())
@@ -110,5 +164,3 @@ def train(nloader, aloader, model, batch_size, optimizer, viz, device):
         optimizer.zero_grad()
         cost.backward()
         optimizer.step()
-
-

@@ -30,9 +30,12 @@ if __name__ == '__main__':
                  if active_mods else 'baseline')
     print(f'Active modifications: {sorted(active_mods) if active_mods else "none (baseline RTFM)"}')
 
-    # Append mod tag to checkpoint name so ablation runs don't overwrite each other
+    # Append mod + loss tags so ablation runs don't overwrite each other
     if active_mods:
         args.model_name = args.model_name + '_' + mod_label + '_'
+    if args.loss != 'rtfm':
+        args.model_name = args.model_name + args.loss + '_'
+    print(f'Loss function : {args.loss}')
 
     train_nloader = DataLoader(Dataset(args, test_mode=False, is_normal=True),
                                batch_size=args.batch_size, shuffle=True,
@@ -74,7 +77,7 @@ if __name__ == '__main__':
     test_info = {"epoch": [], "test_AUC": [], "test_PR_AUC": []}
     best_AUC = -1
     output_path = ''   # put your own path here
-    auc, pr_auc, _, _, _, _ = test(test_loader, model, args, viz, device)
+    auc, pr_auc, _, _, _, _, _ = test(test_loader, model, args, viz, device)
 
     for step in tqdm(
             range(1, args.max_epoch + 1),
@@ -87,10 +90,13 @@ if __name__ == '__main__':
         if (step - 1) % len(train_aloader) == 0:
             loadera_iter = iter(train_aloader)
 
-        train(loadern_iter, loadera_iter, model, args.batch_size, optimizer, viz, device)
+        train(loadern_iter, loadera_iter, model, args.batch_size, optimizer, viz, device,
+              loss_name=args.loss,
+              smooth_weight=args.smooth_weight,
+              sparse_weight=args.sparse_weight)
         scheduler.step()
 
-        auc, pr_auc, fpr, tpr, precision, recall = test(test_loader, model, args, viz, device)
+        auc, pr_auc, fpr, tpr, precision, recall, _ = test(test_loader, model, args, viz, device)
         test_info["epoch"].append(step)
         test_info["test_AUC"].append(auc)
         test_info["test_PR_AUC"].append(pr_auc)

@@ -28,3 +28,11 @@ parser.add_argument('--mod', default='', type=str,
                          '1=T-DFFN PDC branches, 2=T-FSAS attention, '
                          '3=freq magnitude, 4=FreqGated classifier head '
                          '(e.g. --mod 1,2 or --mod 1,2,3,4)')
+parser.add_argument('--loss', default='rtfm',
+                    choices=['rtfm', 'ranking', 'focal', 'contrastive'],
+                    help='loss function: rtfm (default) | ranking (Sultani MIL hinge) | '
+                         'focal (Focal-BCE) | contrastive (cosine-margin)')
+parser.add_argument('--smooth-weight', type=float, default=8e-4,
+                    help='temporal smoothness regulariser weight (default: 8e-4)')
+parser.add_argument('--sparse-weight', type=float, default=8e-3,
+                    help='sparsity regulariser weight (default: 8e-3)')
