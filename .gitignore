@@ -29,3 +29,8 @@ recall.npy
 .ipynb_checkpoints/
 *.bak
 ckpt/
+
+pipeline_diagram.png
+pipeline_diagram.py
+INSTRUCTIONS.md
+instructions.pdf
