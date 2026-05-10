@@ -21,34 +21,39 @@ class TemporalDFFN(nn.Module):
     """
     Discriminative Frequency-domain FFN adapted for RTFM's temporal axis.
 
-    Operates on channels-FIRST tensors (B, C, T) to match the Conv1d convention
-    used throughout Aggregate in model.py.
+    v2: Uses global rfft over the full T=32 sequence (17 frequency bins) instead
+    of the previous patch-based rfft(4) which gave only 3 bins with no global
+    temporal context. Low bins capture slow background drift; high bins capture
+    rapid anomaly bursts — complementing the dilation convolutions that handle
+    local multi-scale spatial patterns.
 
-    W_quant is initialised to ones so the module starts as a near-identity,
-    preserving the original RTFM output at iteration 0.
+    W_quant (1, C, 17) is a per-channel spectral amplitude filter, init=1
+    (pass-through). It gets zero weight-decay and lr×2 from the optimizer in
+    main.py so it can adapt freely without shrinking toward zero.
+
+    out_proj is re-zeroed in Model.__init__ after weight_init runs (same pattern
+    as TemporalFSAS), guaranteeing exact identity residual at step 0.
 
     Args:
         channels   (int): feature channels C (512 for PDC branches).
-        patch_size (int): temporal patch size. Must divide T=32 evenly.
-                          Default 4 → 8 non-overlapping patches of 4 snippets.
+        patch_size (int): kept for API compatibility; unused in v2.
     """
 
     def __init__(self, channels: int, patch_size: int = 4):
         super().__init__()
-        self.patch_size = patch_size
-        n_bins = patch_size // 2 + 1    # rfft output bins for real input
+        # patch_size retained for API compat; global FFT is always used
+        n_bins = 17  # T=32 → rfft → T//2+1 = 17 bins
 
-        # Learnable spectral quantization — shape (1, C, n_bins).
-        # Broadcasts over batch and patch dimensions.
-        # Init to ones: identity at start of training.
+        # Learnable per-channel spectral amplitude filter.
+        # Shape (1, C, n_bins) broadcasts over batch dimension.
+        # Init=1 → identity filter; zero weight-decay applied in main.py.
         self.W_quant = nn.Parameter(torch.ones(1, channels, n_bins))
 
-        # GroupNorm over channels (works in (B, C, T) format).
         self.norm = nn.GroupNorm(1, channels)
 
-        # GEGLU gate using Conv1d(1×1) to stay in channels-first format.
-        self.gate_proj = nn.Conv1d(channels, channels * 2, kernel_size=1, bias=False)
-        self.out_proj  = nn.Conv1d(channels, channels,     kernel_size=1, bias=False)
+        # Zero-init projection — re-zeroed in Model.__init__ after weight_init.
+        self.out_proj = nn.Conv1d(channels, channels, kernel_size=1, bias=False)
+        nn.init.zeros_(self.out_proj.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -61,37 +66,16 @@ class TemporalDFFN(nn.Module):
         x = self.norm(x)
 
         B, C, T = x.shape
-        P = self.patch_size
+        n_bins = T // 2 + 1  # handles T ≠ 32 gracefully
 
-        # Zero-pad T to a multiple of P. No-op when T=32 and P=4 or P=8.
-        pad = (P - T % P) % P
-        if pad:
-            x = nn.functional.pad(x, (0, pad))
-        Tp = x.shape[2]
-        n_patches = Tp // P
+        # Global temporal spectral filter
+        xf = fft.rfft(x, dim=2)             # (B, C, n_bins) complex
+        W  = self.W_quant[:, :, :n_bins]    # (1, C, n_bins) — clips if T < 32
+        xf = xf * W                          # per-channel amplitude scaling
+        x  = fft.irfft(xf, n=T, dim=2)     # (B, C, T)
 
-        # Fold into patches: (B, C, n_patches, P)
-        xp = x.reshape(B, C, n_patches, P)
-
-        # FFT along the patch (time) axis → complex (B, C, n_patches, n_bins)
-        xf = fft.rfft(xp, dim=-1)
-
-        # Learnable spectral weighting. W_quant: (1, C, n_bins)
-        # Unsqueeze to (1, C, 1, n_bins) to broadcast over n_patches.
-        xf = xf * self.W_quant.unsqueeze(2)
-
-        # IFFT back to time domain → (B, C, n_patches, P)
-        xp = fft.irfft(xf, n=P, dim=-1)
-
-        # Unfold and trim padding → (B, C, T)
-        x = xp.reshape(B, C, Tp)[:, :, :T]
-
-        # GEGLU gating
-        gated = self.gate_proj(x)           # (B, 2C, T)
-        x1, x2 = gated.chunk(2, dim=1)     # each (B, C, T)
-        x = x1 * torch.sigmoid(x2)
-
-        x = self.out_proj(x)                # (B, C, T)
+        # Zero-init projection: exact identity at step 0, learns correction over time
+        x = self.out_proj(x)                 # (B, C, T)
         return x + residual
 
 
