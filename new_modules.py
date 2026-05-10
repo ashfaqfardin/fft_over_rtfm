@@ -63,13 +63,16 @@ class TemporalDFFN(nn.Module):
 
         # exp(W_quant) for trained bins; exp(0)=1 for any extra high-freq bins
         # that appear in variable-length test videos (T > 32).
+        # tanh gives soft-bounded log-scale ∈ (-2, 2) → amplitude ∈ (0.14, 7.39).
+        # Unlike hard clamp, tanh has non-zero gradient everywhere so W_quant
+        # never gets stuck at an extreme value with a dead gradient.
         w = self.W_quant
         w_bins = w.shape[2]
         if n_bins <= w_bins:
-            scale = torch.exp(w[:, :, :n_bins].clamp(-2, 2))
+            scale = torch.exp(w[:, :, :n_bins].tanh() * 2)
         else:
             pad = torch.zeros(1, C, n_bins - w_bins, device=x.device, dtype=x.dtype)
-            scale = torch.exp(torch.cat([w, pad], dim=2).clamp(-2, 2))
+            scale = torch.exp(torch.cat([w, pad], dim=2).tanh() * 2)
 
         xf = xf * scale
         return fft.irfft(xf, n=T, dim=2)   # (B, C, T)

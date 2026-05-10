@@ -59,14 +59,16 @@ if __name__ == '__main__':
         os.makedirs('./ckpt')
 
     # W_quant params (inside TemporalDFFN) must not be regularised toward zero.
-    # Give them zero weight decay and a slightly higher lr.
+    # Give them a small weight decay to prevent unbounded filter drift.
+    # weight_decay=1e-3 pulls W_quant toward 0 (identity filter), regularising
+    # the spectral filter and preventing it from locking onto training artefacts.
     w_quant_params = [p for n, p in model.named_parameters() if 'W_quant' in n]
     other_params   = [p for n, p in model.named_parameters() if 'W_quant' not in n]
 
     if w_quant_params:
         optimizer = optim.Adam([
             {'params': other_params,   'lr': config.lr[0], 'weight_decay': 0.005},
-            {'params': w_quant_params, 'lr': config.lr[0] * 2, 'weight_decay': 0.0},
+            {'params': w_quant_params, 'lr': config.lr[0] * 2, 'weight_decay': 1e-3},
         ])
     else:
         optimizer = optim.Adam(model.parameters(),
