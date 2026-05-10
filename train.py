@@ -182,7 +182,7 @@ _LOSS_REGISTRY = {
 def train(nloader, aloader, model, batch_size, optimizer, viz, device,
           loss_fn, smooth_weight=8e-4, sparse_weight=8e-3,
           pseudo_weight=0.0, pseudo_threshold=0.8,
-          grad_clip=1.0):
+          grad_clip=10.0):
     with torch.set_grad_enabled(True):
         model.train()
 
@@ -236,6 +236,7 @@ def train(nloader, aloader, model, batch_size, optimizer, viz, device,
         viz.plot_lines('sparsity loss', loss_sparse.item())
         optimizer.zero_grad()
         cost.backward()
-        # Gradient clipping prevents large spikes from the margin=100 magnitude term.
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+        # Gradient clipping prevents extreme spikes (0 = disabled).
+        if grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
         optimizer.step()

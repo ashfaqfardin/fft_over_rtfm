@@ -48,3 +48,7 @@ parser.add_argument('--pseudo-warmup', type=int, default=20,
                     help='epoch after which pseudo-label loss activates (default: 20)')
 parser.add_argument('--pseudo-threshold', type=float, default=0.8,
                     help='confidence threshold for pseudo-label selection (default: 0.8)')
+parser.add_argument('--grad-clip', type=float, default=10.0,
+                    help='max gradient norm for clipping (default: 10.0; 0 disables clipping)')
+parser.add_argument('--warmup-epochs', type=int, default=5,
+                    help='number of linear LR warm-up epochs before cosine schedule (default: 5)')
