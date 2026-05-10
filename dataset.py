@@ -32,22 +32,22 @@ class Dataset(data.Dataset):
             if self.dataset == 'shanghai':
                 if self.is_normal:
                     self.list = self.list[63:]
-                    print('normal list for shanghai tech')
-                    print(self.list)
+                    # print('normal list for shanghai tech')
+                    # print(self.list)
                 else:
                     self.list = self.list[:63]
-                    print('abnormal list for shanghai tech')
-                    print(self.list)
+                    # print('abnormal list for shanghai tech')
+                    # print(self.list)
 
             elif self.dataset == 'ucf':
                 if self.is_normal:
                     self.list = self.list[810:]
-                    print('normal list for ucf')
-                    print(self.list)
+                    # print('normal list for ucf')
+                    # print(self.list)
                 else:
                     self.list = self.list[:810]
-                    print('abnormal list for ucf')
-                    print(self.list)
+                    # print('abnormal list for ucf')
+                    # print(self.list)
 
     def __getitem__(self, index):
         label = self.get_label()  # video-level label 0/1
