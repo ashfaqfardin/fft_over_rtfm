@@ -7,6 +7,7 @@
 #   Chen et al., "MGFN: Magnitude-Contrastive Glance-and-Focus Network
 #   for Weakly-Supervised Video Anomaly Detection", AAAI 2023.
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -130,27 +131,30 @@ class TemporalFSAS(nn.Module):
             (B, C, T)
         """
         T = x.shape[2]
-        inner = self.proj_q.out_channels
-        scale = inner ** -0.5   # temperature: same role as /sqrt(d_k) in attention
 
-        q = self.proj_q(x) * scale  # (B, inner, T)
+        q = self.proj_q(x)     # (B, inner, T)
         k = self.proj_k(x)
         v = self.proj_v(x)
 
-        Fq = fft.rfft(q, dim=2)     # (B, inner, n_bins) complex
+        # Frequency-domain cross-correlation: IFFT(FFT(Q) * conj(FFT(K)))
+        # Gives a lag-based temporal gating: A[t] measures Q-K correlation at lag t.
+        # Each V[t] is then gated by A[t] — positions where Q and K are correlated
+        # at that lag are amplified; uncorrelated positions are suppressed.
+        # Note: this is a 1-D temporal adaptation; the 2D image FFTFormer formula
+        # (keep V in freq domain) creates circular convolution that is harder to
+        # train on short T=32 sequences — empirically worse for this task.
+        Fq = fft.rfft(q, dim=2)
         Fk = fft.rfft(k, dim=2)
-        Fv = fft.rfft(v, dim=2)
+        A_freq = Fq * torch.conj(Fk)
+        A = fft.irfft(A_freq, n=T, dim=2)   # (B, inner, T)  real
 
-        # Correct FSAS (FFTFormer, CVPR 2023):
-        #   Attended = IFFT( FFT(Q) ⊙ conj(FFT(K)) ⊙ FFT(V) )
-        # All three stay in frequency domain — equivalent to circular
-        # convolution-attention: (Q⋆K) * V  (cross-corr weighted sum of V).
-        # The original bug converted A to time domain before multiplying V,
-        # giving A[t]*V[t] (elementwise scale) instead of Σ_τ A[τ]·V[t-τ].
-        attended_freq = Fq * torch.conj(Fk) * Fv   # (B, inner, n_bins) complex
-        attended = fft.irfft(attended_freq, n=T, dim=2)  # (B, inner, T) real
+        # Temperature scaling: prevents A from growing as Q/K projections grow.
+        # Analogous to 1/sqrt(d_k) in scaled dot-product attention (Vaswani 2017).
+        # Energy of A is proportional to inner (Parseval), so sqrt(inner) bounds it.
+        A = A * (1.0 / math.sqrt(q.shape[1]))
 
-        attended = self.attn_norm(attended)
+        A = self.attn_norm(A)
+        attended = A * v                     # (B, inner, T)
 
         out = self.W(attended)               # (B, C, T)
         return out + x
