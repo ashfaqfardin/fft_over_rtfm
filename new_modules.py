@@ -197,27 +197,29 @@ class TemporalFSAS(nn.Module):
 
 def freq_magnitude(features: torch.Tensor) -> torch.Tensor:
     """
-    Combined magnitude-deviation + phase-deviation anomaly score.
+    High-pass temporal residual magnitude for anomaly-aware snippet scoring.
 
-    Two complementary signals are averaged:
+    KEY DESIGN DECISION — axis choice:
+        FFT must be applied over the TEMPORAL axis (dim=1, T=32), NOT the feature
+        axis (dim=2, F=2048).  Feature dimensions are unordered learned I3D
+        representations; their FFT phase is noise.  The temporal axis has natural
+        causal ordering, so its FFT has physical meaning.
 
-    1. Magnitude deviation — per-snippet L2 distance from the video's temporal mean.
-       Captures energy-level anomalies (high-activity events relative to video context).
-       Scene-level bias is removed because the mean absorbs global activation scale.
+    INTUITION:
+        Normal activities (walking, driving, eating) produce smooth, slowly-varying
+        temporal feature sequences → energy concentrated in LOW temporal frequencies.
+        Anomalous events (assault, explosion, robbery) cause abrupt feature-space
+        discontinuities → energy concentrated in HIGH temporal frequencies.
 
-    2. Phase deviation — mean absolute circular phase shift from the video's mean phase.
-       The FFT over F decomposes each snippet's feature vector into spectral components;
-       the phase of each component encodes the structural pattern of the feature
-       distribution.  Normal activities evolve slowly → small phase shifts.
-       Anomalous events cause abrupt structural breaks → sudden phase jumps.
-       Phase is energy-invariant: a loud but normal event (sports crowd) has high
-       magnitude but consistent phase; a true anomaly shows a phase discontinuity
-       even when its energy is moderate.
+        Low-pass filtering the temporal sequence gives a smooth baseline that tracks
+        gradual scene changes.  Subtracting it leaves the high-frequency residual —
+        exactly the signal that betrays sudden anomalous events.
 
-    Why atan2(sin, cos) for circular wrapping:
-       Naive subtraction φ_t − φ_mean can overflow at ±π boundaries (e.g., +3.1 − −3.1
-       gives 6.2 instead of the correct ~0.2).  atan2(sin(Δ), cos(Δ)) maps any Δ back
-       to [−π, π] correctly.
+    PARAMETERS:
+        K = T // 8 = 4 bins for T=32.  Bins 0..3 cover temporal periods of
+        32, 16, 10, 8 segments respectively.  Removing them eliminates very slow
+        drift (DC, camera pan, lighting change) while keeping events that last
+        1–7 segments — the typical UCF-Crime anomaly duration.
 
     Args:
         features: (N, T, F)  where N = B * ncrops, T = 32, F = 2048
@@ -225,28 +227,20 @@ def freq_magnitude(features: torch.Tensor) -> torch.Tensor:
     Returns:
         (N, T)  — same shape as torch.norm(features, p=2, dim=2)
     """
-    # ── 1. Magnitude deviation ────────────────────────────────────────────────
-    baseline  = features.mean(dim=1, keepdim=True)        # (N, 1, F)
-    mag_score = (features - baseline).norm(p=2, dim=2)    # (N, T)
+    N, T, F = features.shape
 
-    # ── 2. Phase deviation ────────────────────────────────────────────────────
-    Xf         = fft.rfft(features, dim=2)                # (N, T, F//2+1) complex
-    phase      = torch.angle(Xf)                          # (N, T, F//2+1) in [−π, π]
-    mean_phase = phase.mean(dim=1, keepdim=True)          # (N, 1, F//2+1)
-    diff       = phase - mean_phase                       # (N, T, F//2+1)
-    diff       = torch.atan2(torch.sin(diff),
-                             torch.cos(diff))             # circular wrap to [−π, π]
-    phase_score = diff.abs().mean(dim=2)                  # (N, T)
+    # FFT over the temporal axis — physically meaningful ordering
+    Xf = fft.rfft(features, dim=1)              # (N, T//2+1, F) complex
 
-    # ── 3. Normalise each score to [0,1] within the video, then combine ─────
-    # Without normalisation mag_score (L2 over F=2048 dims, values ~10–100) would
-    # drown out phase_score (mean absolute angle, values in [0, π]).
-    def _norm(s):
-        mn = s.min(dim=1, keepdim=True).values
-        mx = s.max(dim=1, keepdim=True).values
-        return (s - mn) / (mx - mn + 1e-8)          # (N, T) in [0, 1]
+    # Reconstruct the slow-varying baseline from DC + K-1 low freq bins only
+    K = max(2, T // 8)                          # 4 bins for T=32
+    Xf_low = torch.zeros_like(Xf)
+    Xf_low[:, :K, :] = Xf[:, :K, :]            # keep only low-freq components
 
-    return 0.5 * _norm(mag_score) + 0.5 * _norm(phase_score)
+    baseline = fft.irfft(Xf_low, n=T, dim=1)   # (N, T, F) smooth temporal baseline
+    residual  = features - baseline              # (N, T, F) high-freq anomaly signal
+
+    return residual.norm(p=2, dim=2)             # (N, T)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
