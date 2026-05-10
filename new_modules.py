@@ -66,11 +66,22 @@ class TemporalDFFN(nn.Module):
         x = self.norm(x)
 
         B, C, T = x.shape
-        n_bins = T // 2 + 1  # handles T ≠ 32 gracefully
+        n_bins = T // 2 + 1
 
         # Global temporal spectral filter
-        xf = fft.rfft(x, dim=2)             # (B, C, n_bins) complex
-        W  = self.W_quant[:, :, :n_bins]    # (1, C, n_bins) — clips if T < 32
+        xf = fft.rfft(x, dim=2)   # (B, C, n_bins) complex
+
+        # W_quant was trained for T=32 (17 bins). For shorter T, clip it.
+        # For longer T (variable-length test videos), pad high-freq bins with 1.0
+        # so they pass through unchanged — the learned filter still applies to the
+        # low-frequency structure where the anomaly signal lives.
+        w_bins = self.W_quant.shape[2]
+        if n_bins <= w_bins:
+            W = self.W_quant[:, :, :n_bins]
+        else:
+            pad = torch.ones(1, C, n_bins - w_bins, device=x.device)
+            W = torch.cat([self.W_quant, pad], dim=2)
+
         xf = xf * W                          # per-channel amplitude scaling
         x  = fft.irfft(xf, n=T, dim=2)     # (B, C, T)
 

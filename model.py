@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.init as torch_init
-torch.set_default_tensor_type('torch.FloatTensor')
+torch.set_default_dtype(torch.float32)
 
 from new_modules import TemporalDFFN, TemporalFSAS, freq_magnitude, FreqGatedClassifier, GlanceFocusBlock
 

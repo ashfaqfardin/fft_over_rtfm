@@ -4,7 +4,7 @@ from utils import process_feat
 import torch
 from torch.utils.data import DataLoader
 
-torch.set_default_tensor_type('torch.FloatTensor')
+torch.set_default_dtype(torch.float32)
 
 
 class Dataset(data.Dataset):
