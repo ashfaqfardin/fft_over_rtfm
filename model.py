@@ -217,13 +217,6 @@ class Model(nn.Module):
         self.sigmoid  = nn.Sigmoid()
         self.apply(weight_init)
 
-        # Re-zero TemporalDFFN out_proj after weight_init overwrites it with xavier.
-        # Guarantees exact identity residual at step 0 (same pattern as TemporalFSAS).
-        if 1 in active_mods:
-            for module in self.modules():
-                if isinstance(module, TemporalDFFN):
-                    nn.init.zeros_(module.out_proj.weight)
-
         # Re-zero TemporalFSAS BN output projections after weight_init runs
         # (weight_init applies xavier to the preceding Conv1d but leaves BN
         # weights alone; this block re-confirms the zero-init is intact)

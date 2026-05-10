@@ -21,73 +21,58 @@ class TemporalDFFN(nn.Module):
     """
     Discriminative Frequency-domain FFN adapted for RTFM's temporal axis.
 
-    v2: Uses global rfft over the full T=32 sequence (17 frequency bins) instead
-    of the previous patch-based rfft(4) which gave only 3 bins with no global
-    temporal context. Low bins capture slow background drift; high bins capture
-    rapid anomaly bursts — complementing the dilation convolutions that handle
-    local multi-scale spatial patterns.
+    v3: Log-domain spectral amplitude filter over the full T=32 sequence.
 
-    W_quant (1, C, 17) is a per-channel spectral amplitude filter, init=1
-    (pass-through). It gets zero weight-decay and lr×2 from the optimizer in
-    main.py so it can adapt freely without shrinking toward zero.
+    scale = exp(W_quant).  W_quant=0 at init → scale=1 everywhere → the
+    module is an EXACT identity from step 0.  Unlike the previous zero-init
+    out_proj approach, the gradient reaches W_quant immediately from step 0
+    (no zero-weight path blocking it).
 
-    out_proj is re-zeroed in Model.__init__ after weight_init runs (same pattern
-    as TemporalFSAS), guaranteeing exact identity residual at step 0.
+    exp() keeps scale strictly positive (no phase inversions).
+    Clamped to [-2, 2] so scale stays in [0.14, 7.39] — prevents runaway
+    amplification while still allowing meaningful frequency selection.
+
+    Low bins (0–4): learn to weight slow background patterns.
+    High bins (8–16): learn to weight rapid anomaly bursts.
+    Both complement the dilation convolutions which handle local spatial scale.
 
     Args:
         channels   (int): feature channels C (512 for PDC branches).
-        patch_size (int): kept for API compatibility; unused in v2.
+        patch_size (int): kept for API compatibility; unused.
     """
 
     def __init__(self, channels: int, patch_size: int = 4):
         super().__init__()
-        # patch_size retained for API compat; global FFT is always used
         n_bins = 17  # T=32 → rfft → T//2+1 = 17 bins
 
-        # Learnable per-channel spectral amplitude filter.
-        # Shape (1, C, n_bins) broadcasts over batch dimension.
-        # Init=1 → identity filter; zero weight-decay applied in main.py.
-        self.W_quant = nn.Parameter(torch.ones(1, channels, n_bins))
-
-        self.norm = nn.GroupNorm(1, channels)
-
-        # Zero-init projection — re-zeroed in Model.__init__ after weight_init.
-        self.out_proj = nn.Conv1d(channels, channels, kernel_size=1, bias=False)
-        nn.init.zeros_(self.out_proj.weight)
+        # Log-spectral filter: W_quant=0 → exp(0)=1 → identity at init.
+        # Named W_quant so main.py zero weight-decay / lr×2 treatment applies.
+        self.W_quant = nn.Parameter(torch.zeros(1, channels, n_bins))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
             x: (B, C, T)
         Returns:
-            (B, C, T)
+            (B, C, T)  — exact identity when W_quant=0
         """
-        residual = x
-        x = self.norm(x)
-
         B, C, T = x.shape
         n_bins = T // 2 + 1
 
-        # Global temporal spectral filter
         xf = fft.rfft(x, dim=2)   # (B, C, n_bins) complex
 
-        # W_quant was trained for T=32 (17 bins). For shorter T, clip it.
-        # For longer T (variable-length test videos), pad high-freq bins with 1.0
-        # so they pass through unchanged — the learned filter still applies to the
-        # low-frequency structure where the anomaly signal lives.
-        w_bins = self.W_quant.shape[2]
+        # exp(W_quant) for trained bins; exp(0)=1 for any extra high-freq bins
+        # that appear in variable-length test videos (T > 32).
+        w = self.W_quant
+        w_bins = w.shape[2]
         if n_bins <= w_bins:
-            W = self.W_quant[:, :, :n_bins]
+            scale = torch.exp(w[:, :, :n_bins].clamp(-2, 2))
         else:
-            pad = torch.ones(1, C, n_bins - w_bins, device=x.device)
-            W = torch.cat([self.W_quant, pad], dim=2)
+            pad = torch.zeros(1, C, n_bins - w_bins, device=x.device, dtype=x.dtype)
+            scale = torch.exp(torch.cat([w, pad], dim=2).clamp(-2, 2))
 
-        xf = xf * W                          # per-channel amplitude scaling
-        x  = fft.irfft(xf, n=T, dim=2)     # (B, C, T)
-
-        # Zero-init projection: exact identity at step 0, learns correction over time
-        x = self.out_proj(x)                 # (B, C, T)
-        return x + residual
+        xf = xf * scale
+        return fft.irfft(xf, n=T, dim=2)   # (B, C, T)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
