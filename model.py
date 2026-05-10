@@ -143,11 +143,11 @@ class Aggregate(nn.Module):
             nn.BatchNorm1d(2048),
         )
 
-        # Mod 1: T-DFFN frequency gating after each PDC branch
+        # Mod 1: complex-valued spectral filter on concatenated PDC output (1536-ch).
+        # One combined filter (AFNO insight: cross-branch frequency interactions)
+        # vs. three separate per-branch filters — same parameter count, more expressive.
         if 1 in active_mods:
-            self.dffn1 = TemporalDFFN(channels=512, patch_size=4)
-            self.dffn2 = TemporalDFFN(channels=512, patch_size=4)
-            self.dffn3 = TemporalDFFN(channels=512, patch_size=4)
+            self.dffn_combined = TemporalDFFN(channels=1536)
 
         # Mod 2: TemporalFSAS replaces NONLocalBlock1D
         if 2 in active_mods:
@@ -167,13 +167,12 @@ class Aggregate(nn.Module):
         out2 = self.conv_2(out)
         out3 = self.conv_3(out)
 
-        # Mod 1: apply T-DFFN frequency gating to each PDC branch output
-        if 1 in self.active_mods:
-            out1 = self.dffn1(out1)
-            out2 = self.dffn2(out2)
-            out3 = self.dffn3(out3)
-
         out_d = torch.cat((out1, out2, out3), dim=1)   # (B, 1536, T)
+
+        # Mod 1: complex spectral filter on concatenated PDC output.
+        # Applied post-concat so the filter sees all dilation scales together.
+        if 1 in self.active_mods:
+            out_d = self.dffn_combined(out_d)           # (B, 1536, T)
         out = self.conv_4(out)                          # (B, 512, T)
         out = self.non_local(out)                       # (B, 512, T)
 

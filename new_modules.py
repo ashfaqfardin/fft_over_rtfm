@@ -19,63 +19,68 @@ import torch.fft as fft
 
 class TemporalDFFN(nn.Module):
     """
-    Discriminative Frequency-domain FFN adapted for RTFM's temporal axis.
+    Complex-valued temporal spectral filter for RTFM's PDC branch outputs.
 
-    v3: Log-domain spectral amplitude filter over the full T=32 sequence.
+    v4 — literature-grounded redesign:
 
-    scale = exp(W_quant).  W_quant=0 at init → scale=1 everywhere → the
-    module is an EXACT identity from step 0.  Unlike the previous zero-init
-    out_proj approach, the gradient reaches W_quant immediately from step 0
-    (no zero-weight path blocking it).
+    FEDformer (ICML 2022) showed that frequency-domain weights should be
+    complex-valued (torch.cfloat), capturing both amplitude AND phase.
+    Phase shifts let the filter model temporal offsets between channels —
+    impossible with real-only scaling.  FEDformer also proved that diverse
+    mode coverage (all bins, not just low-pass) outperforms low-pass only.
 
-    exp() keeps scale strictly positive (no phase inversions).
-    Clamped to [-2, 2] so scale stays in [0.14, 7.39] — prevents runaway
-    amplification while still allowing meaningful frequency selection.
+    AFNO (ICLR 2022) showed that applying the filter to the COMBINED
+    multi-scale output (all dilation branches together) captures cross-branch
+    frequency correlations that per-branch filters miss.  This module is
+    therefore instantiated ONCE on the 1536-channel concatenated PDC output
+    in Aggregate, not three times on individual 512-channel branches.
 
-    Low bins (0–4): learn to weight slow background patterns.
-    High bins (8–16): learn to weight rapid anomaly bursts.
-    Both complement the dilation convolutions which handle local spatial scale.
+    Parameterisation — complex delta filter:
+        W = 1 + ΔW,  where ΔW = W_quant[...,0] + j·W_quant[...,1]
+    Init: W_quant=0 → ΔW=0+0j → W=1+0j → EXACT identity, gradient flows
+    from step 0.  Weight decay (wd=1e-3 in main.py) pulls ΔW back toward 0
+    (identity), regularising the filter against spectral overfitting.
 
     Args:
-        channels   (int): feature channels C (512 for PDC branches).
-        patch_size (int): kept for API compatibility; unused.
+        channels  (int): input channels — 1536 for concatenated PDC output.
+        patch_size(int): kept for API compatibility; unused.
+        n_bins    (int): rfft bins to filter (default 17 = all bins for T=32).
+                         Bins beyond n_bins pass through unchanged (scale=1).
     """
 
-    def __init__(self, channels: int, patch_size: int = 4):
+    def __init__(self, channels: int, patch_size: int = 4, n_bins: int = 17):
         super().__init__()
-        n_bins = 17  # T=32 → rfft → T//2+1 = 17 bins
+        self.n_bins = n_bins
 
-        # Log-spectral filter: W_quant=0 → exp(0)=1 → identity at init.
-        # Named W_quant so main.py zero weight-decay / lr×2 treatment applies.
-        self.W_quant = nn.Parameter(torch.zeros(1, channels, n_bins))
+        # Complex delta: W_quant[..., 0]=real_delta, W_quant[..., 1]=imag_delta.
+        # All zeros init → ΔW=0+0j → W=1+0j → identity.
+        # Named W_quant so main.py optimizer treatment (lr×2, wd=1e-3) applies.
+        self.W_quant = nn.Parameter(torch.zeros(1, channels, n_bins, 2))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
             x: (B, C, T)
         Returns:
-            (B, C, T)  — exact identity when W_quant=0
+            (B, C, T) — exact identity when W_quant=0
         """
         B, C, T = x.shape
-        n_bins = T // 2 + 1
+        actual_bins = T // 2 + 1
+        n = min(self.n_bins, actual_bins)   # bins covered by the learned filter
 
-        xf = fft.rfft(x, dim=2)   # (B, C, n_bins) complex
+        xf = fft.rfft(x, dim=2)            # (B, C, actual_bins) complex
 
-        # exp(W_quant) for trained bins; exp(0)=1 for any extra high-freq bins
-        # that appear in variable-length test videos (T > 32).
-        # tanh gives soft-bounded log-scale ∈ (-2, 2) → amplitude ∈ (0.14, 7.39).
-        # Unlike hard clamp, tanh has non-zero gradient everywhere so W_quant
-        # never gets stuck at an extreme value with a dead gradient.
-        w = self.W_quant
-        w_bins = w.shape[2]
-        if n_bins <= w_bins:
-            scale = torch.exp(w[:, :, :n_bins].tanh() * 2)
-        else:
-            pad = torch.zeros(1, C, n_bins - w_bins, device=x.device, dtype=x.dtype)
-            scale = torch.exp(torch.cat([w, pad], dim=2).tanh() * 2)
+        # Complex filter W = 1 + ΔW (identity at init, regularised by wd)
+        W_delta = torch.view_as_complex(
+            self.W_quant[:, :, :n, :].contiguous()
+        )                                   # (1, C, n) complex
+        W = 1.0 + W_delta                   # (1, C, n) complex — W=1+0j at init
 
-        xf = xf * scale
-        return fft.irfft(xf, n=T, dim=2)   # (B, C, T)
+        # Apply filter to the first n bins; high bins pass through unchanged.
+        # torch.cat with an empty tensor is a no-op when n == actual_bins.
+        xf_out = torch.cat([xf[:, :, :n] * W, xf[:, :, n:]], dim=2)
+
+        return fft.irfft(xf_out, n=T, dim=2)   # (B, C, T)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
