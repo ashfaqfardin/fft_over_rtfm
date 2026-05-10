@@ -10,11 +10,13 @@ def sparsity(arr, batch_size, lamda2):
     return lamda2 * loss
 
 
-def smooth(arr, lamda1):
-    arr2 = torch.zeros_like(arr)
-    arr2[:-1] = arr[1:]
-    arr2[-1] = arr[-1]
-    return lamda1 * torch.sum((arr2 - arr) ** 2)
+def smooth(arr, lamda1, gate_thresh=0.3):
+    # Boundary-aware temporal smoothness (Improvement 5).
+    # Transitions that already differ by > gate_thresh are down-weighted so
+    # genuine anomaly boundaries are not over-penalised.
+    diff = arr[1:] - arr[:-1]                              # (T-1,)
+    gate = torch.sigmoid(gate_thresh - torch.abs(diff).detach())
+    return lamda1 * torch.sum(gate * diff ** 2)
 
 
 def l1_penalty(var):
@@ -124,16 +126,54 @@ class ContrastiveLoss(nn.Module):
         return loss_cls + self.alpha * loss_contrast
 
 
+# ── Loss 5: MGFN Magnitude Contrastive ───────────────────────────────────────
+class MGFNMagnitudeLoss(nn.Module):
+    """Scene-adaptive magnitude contrastive loss from MGFN (AAAI 2023).
+
+    Extends the RTFM magnitude term with two batch-level signals:
+      - Inter-class separation: abnormal mags must exceed normal mags by margin/2.
+      - Intra-class compactness: variance within each class is penalised so the
+        magnitude distribution is tight and scene-independent.
+    """
+    def __init__(self, alpha=0.0001, margin=100, mc_weight=0.1):
+        super().__init__()
+        self.alpha     = alpha
+        self.margin    = margin
+        self.mc_weight = mc_weight
+        self.criterion = nn.BCELoss()
+
+    def forward(self, score_normal, score_abnormal, nlabel, alabel, feat_n, feat_a):
+        label = torch.cat((nlabel, alabel), 0)
+        score = torch.cat((score_normal, score_abnormal), 0).squeeze()
+        loss_cls = self.criterion(score, label.to(score.device))
+
+        # Original RTFM magnitude ranking term
+        loss_abn  = torch.abs(self.margin - torch.norm(feat_a.mean(1), p=2, dim=1))
+        loss_nor  = torch.norm(feat_n.mean(1), p=2, dim=1)
+        loss_rtfm = torch.mean((loss_abn + loss_nor) ** 2)
+
+        # MGFN batch-level magnitude contrastive
+        mag_a = torch.norm(feat_a.mean(1), p=2, dim=1)   # (B,)
+        mag_n = torch.norm(feat_n.mean(1), p=2, dim=1)   # (B,)
+        inter      = F.relu(self.margin / 2 - (mag_a - mag_n)).mean()
+        intra_comp = torch.var(mag_a) + torch.var(mag_n)
+        loss_mc    = inter + 0.5 * intra_comp
+
+        return loss_cls + self.alpha * loss_rtfm + self.mc_weight * loss_mc
+
+
 _LOSS_REGISTRY = {
     'rtfm':        lambda: RTFM_loss(alpha=0.0001, margin=100),
     'ranking':     lambda: RankingLoss(margin=1.0),
     'focal':       lambda: FocalBCELoss(alpha=0.0001, margin=100, gamma=2.0),
     'contrastive': lambda: ContrastiveLoss(alpha=1.0, margin=0.5),
+    'mgfn':        lambda: MGFNMagnitudeLoss(alpha=0.0001, margin=100, mc_weight=0.1),
 }
 
 
 def train(nloader, aloader, model, batch_size, optimizer, viz, device,
-          loss_name='rtfm', smooth_weight=8e-4, sparse_weight=8e-3):
+          loss_name='rtfm', smooth_weight=8e-4, sparse_weight=8e-3,
+          pseudo_weight=0.0, pseudo_threshold=0.8):
     with torch.set_grad_enabled(True):
         model.train()
 
@@ -144,6 +184,9 @@ def train(nloader, aloader, model, batch_size, optimizer, viz, device,
 
         score_abnormal, score_normal, feat_select_abn, feat_select_normal, feat_abn_bottom, \
         feat_normal_bottom, scores, scores_nor_bottom, scores_nor_abn_bag, _ = model(input)
+
+        # Save per-video scores (B*2, T, 1) before flattening for pseudo-labels
+        scores_per_video = scores
 
         scores    = scores.view(batch_size * 32 * 2, -1).squeeze()
         abn_scores = scores[batch_size * 32:]
@@ -157,6 +200,26 @@ def train(nloader, aloader, model, batch_size, optimizer, viz, device,
         cost = (loss_fn(score_normal, score_abnormal, nlabel, alabel,
                         feat_select_normal, feat_select_abn)
                 + loss_smooth + loss_sparse)
+
+        # Pseudo-label self-training (MIST, CVPR 2021) — active when pseudo_weight > 0
+        # After warmup, high-confidence snippet predictions are used as extra supervision.
+        if pseudo_weight > 0.0:
+            # scores_per_video: (B_nor + B_abn, T, 1); normal videos are first half
+            abn_s = scores_per_video[batch_size:, :, 0]   # (B, T)
+            nor_s = scores_per_video[:batch_size, :, 0]   # (B, T)
+            with torch.no_grad():
+                abn_mask = abn_s > pseudo_threshold
+                nor_mask = nor_s < (1.0 - pseudo_threshold)
+            loss_pseudo = torch.tensor(0.0, device=device)
+            if abn_mask.any():
+                loss_pseudo = loss_pseudo + F.binary_cross_entropy(
+                    abn_s[abn_mask], torch.ones(abn_mask.sum(), device=device)
+                )
+            if nor_mask.any():
+                loss_pseudo = loss_pseudo + F.binary_cross_entropy(
+                    nor_s[nor_mask], torch.zeros(nor_mask.sum(), device=device)
+                )
+            cost = cost + pseudo_weight * loss_pseudo
 
         viz.plot_lines('loss', cost.item())
         viz.plot_lines('smooth loss', loss_smooth.item())

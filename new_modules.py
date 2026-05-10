@@ -2,9 +2,14 @@
 # FFTFormer-inspired modules adapted for RTFM's 1-D temporal axis.
 # Reference: Kong et al., "Efficient Frequency Domain-based Transformers
 #            for High-Quality Image Deblurring", CVPR 2023.
+#
+# Mod 5 — GlanceFocusBlock adapted from:
+#   Chen et al., "MGFN: Magnitude-Contrastive Glance-and-Focus Network
+#   for Weakly-Supervised Video Anomaly Detection", AAAI 2023.
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.fft as fft
 
 
@@ -231,3 +236,61 @@ class FreqGatedClassifier(nn.Module):
         scores = self.drop_out(scores)
         scores = self.sigmoid(self.fc3(scores)) # (N, T, 1)
         return scores
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Module 5: GlanceFocusBlock  (MGFN, AAAI 2023)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class GlanceFocusBlock(nn.Module):
+    """
+    Glance-and-Focus block adapted from MGFN (AAAI 2023) for 1-D temporal features.
+
+    Glance branch: global channel attention via temporal average-pooling + MLP,
+    producing a per-channel weight in (0,1) that re-scales all time-steps.
+
+    Focus branch: local gated depthwise conv that sharpens short-range anomaly
+    details without mixing channels (depthwise keeps parameter cost low).
+
+    Both branches are summed and normalised, then added back to the residual
+    so the block is near-identity at initialisation.
+
+    Args:
+        channels (int): number of input/output channels C (512 inside Aggregate).
+    """
+
+    def __init__(self, channels: int):
+        super().__init__()
+
+        # Glance: global temporal pooling → channel MLP → sigmoid gate
+        self.glance_pool = nn.AdaptiveAvgPool1d(1)
+        self.glance_proj = nn.Sequential(
+            nn.Linear(channels, channels // 4),
+            nn.ReLU(),
+            nn.Linear(channels // 4, channels),
+            nn.Sigmoid(),
+        )
+
+        # Focus: depthwise conv (one filter per channel) + pointwise gate
+        self.focus_dw   = nn.Conv1d(channels, channels, kernel_size=3,
+                                    padding=1, groups=channels, bias=False)
+        self.focus_gate = nn.Conv1d(channels, channels, kernel_size=1, bias=False)
+
+        self.norm = nn.BatchNorm1d(channels)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: (B, C, T)
+        Returns:
+            (B, C, T)
+        """
+        # Glance: channel attention from global pool
+        g = self.glance_pool(x).squeeze(-1)        # (B, C)
+        g = self.glance_proj(g).unsqueeze(-1)      # (B, C, 1)
+        x_glance = x * g                           # (B, C, T)
+
+        # Focus: gated depthwise local conv
+        x_focus = torch.sigmoid(self.focus_gate(x)) * self.focus_dw(x)  # (B, C, T)
+
+        return self.norm(x_glance + x_focus) + x   # residual keeps identity at init

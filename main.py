@@ -47,7 +47,8 @@ if __name__ == '__main__':
                               batch_size=1, shuffle=False,
                               num_workers=0, pin_memory=False)
 
-    model = Model(args.feature_size, args.batch_size, active_mods=active_mods)
+    model = Model(args.feature_size, args.batch_size,
+                  active_mods=active_mods, k_ratio=args.k_ratio)
 
     for name, value in model.named_parameters():
         print(name)
@@ -90,10 +91,14 @@ if __name__ == '__main__':
         if (step - 1) % len(train_aloader) == 0:
             loadera_iter = iter(train_aloader)
 
+        # Pseudo-label loss activates only after warmup epochs (MIST, CVPR 2021)
+        pseudo_w = args.pseudo_weight if step > args.pseudo_warmup else 0.0
         train(loadern_iter, loadera_iter, model, args.batch_size, optimizer, viz, device,
               loss_name=args.loss,
               smooth_weight=args.smooth_weight,
-              sparse_weight=args.sparse_weight)
+              sparse_weight=args.sparse_weight,
+              pseudo_weight=pseudo_w,
+              pseudo_threshold=args.pseudo_threshold)
         scheduler.step()
 
         auc, pr_auc, fpr, tpr, precision, recall, _ = test(test_loader, model, args, viz, device)

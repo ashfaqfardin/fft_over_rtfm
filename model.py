@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.init as torch_init
 torch.set_default_tensor_type('torch.FloatTensor')
 
-from new_modules import TemporalDFFN, TemporalFSAS, freq_magnitude, FreqGatedClassifier
+from new_modules import TemporalDFFN, TemporalFSAS, freq_magnitude, FreqGatedClassifier, GlanceFocusBlock
 
 
 def weight_init(m):
@@ -155,6 +155,10 @@ class Aggregate(nn.Module):
         else:
             self.non_local = NONLocalBlock1D(512, sub_sample=False, bn_layer=True)
 
+        # Mod 5: GlanceFocusBlock after non-local attention (MGFN, AAAI 2023)
+        if 5 in active_mods:
+            self.glance_focus = GlanceFocusBlock(channels=512)
+
     def forward(self, x):
         out = x.permute(0, 2, 1)   # (B, T, F) → (B, F, T)
         residual = out
@@ -172,6 +176,11 @@ class Aggregate(nn.Module):
         out_d = torch.cat((out1, out2, out3), dim=1)   # (B, 1536, T)
         out = self.conv_4(out)                          # (B, 512, T)
         out = self.non_local(out)                       # (B, 512, T)
+
+        # Mod 5: Glance-and-Focus channel+local attention (MGFN, AAAI 2023)
+        if 5 in self.active_mods:
+            out = self.glance_focus(out)                # (B, 512, T)
+
         out = torch.cat((out_d, out), dim=1)            # (B, 2048, T)
         out = self.conv_5(out)                          # (B, 2048, T)
         out = out + residual
@@ -180,15 +189,16 @@ class Aggregate(nn.Module):
 
 
 class Model(nn.Module):
-    def __init__(self, n_features, batch_size, active_mods=None):
+    def __init__(self, n_features, batch_size, active_mods=None, k_ratio=0.1):
         super(Model, self).__init__()
         if active_mods is None:
             active_mods = set()
         self.active_mods = active_mods
         self.batch_size = batch_size
         self.num_segments = 32
-        self.k_abn = self.num_segments // 10
-        self.k_nor = self.num_segments // 10
+        # k_ratio controls how many snippets are selected per bag (Improvement 4)
+        self.k_abn = max(1, int(self.num_segments * k_ratio))
+        self.k_nor = max(1, int(self.num_segments * k_ratio))
 
         self.Aggregate = Aggregate(len_feature=2048, active_mods=active_mods)
 

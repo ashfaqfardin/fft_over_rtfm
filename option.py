@@ -24,15 +24,27 @@ parser.add_argument('--dataset', default='ucf', help='dataset to train on')
 parser.add_argument('--plot-freq', type=int, default=10, help='frequency of plotting')
 parser.add_argument('--max-epoch', type=int, default=100, help='maximum iteration to train')
 parser.add_argument('--mod', default='', type=str,
-                    help='comma-separated FFTFormer mods to enable: '
+                    help='comma-separated mods to enable: '
                          '1=T-DFFN PDC branches, 2=T-FSAS attention, '
-                         '3=freq magnitude, 4=FreqGated classifier head '
-                         '(e.g. --mod 1,2 or --mod 1,2,3,4)')
+                         '3=freq magnitude, 4=FreqGated classifier head, '
+                         '5=GlanceFocus (MGFN AAAI-23) '
+                         '(e.g. --mod 1,2 or --mod 1,2,3,4,5)')
 parser.add_argument('--loss', default='rtfm',
-                    choices=['rtfm', 'ranking', 'focal', 'contrastive'],
+                    choices=['rtfm', 'ranking', 'focal', 'contrastive', 'mgfn'],
                     help='loss function: rtfm (default) | ranking (Sultani MIL hinge) | '
-                         'focal (Focal-BCE) | contrastive (cosine-margin)')
+                         'focal (Focal-BCE) | contrastive (cosine-margin) | '
+                         'mgfn (magnitude contrastive, AAAI-23)')
 parser.add_argument('--smooth-weight', type=float, default=8e-4,
                     help='temporal smoothness regulariser weight (default: 8e-4)')
 parser.add_argument('--sparse-weight', type=float, default=8e-3,
                     help='sparsity regulariser weight (default: 8e-3)')
+parser.add_argument('--k-ratio', type=float, default=0.1,
+                    help='fraction of T snippets selected per bag for MIL top-k '
+                         '(default: 0.1 = 3 out of 32; e.g. 0.15 → 4, 0.2 → 6)')
+parser.add_argument('--pseudo-weight', type=float, default=0.0,
+                    help='weight for pseudo-label self-training loss (MIST, CVPR-21); '
+                         '0 disables it (default: 0.0, try 0.05–0.1)')
+parser.add_argument('--pseudo-warmup', type=int, default=20,
+                    help='epoch after which pseudo-label loss activates (default: 20)')
+parser.add_argument('--pseudo-threshold', type=float, default=0.8,
+                    help='confidence threshold for pseudo-label selection (default: 0.8)')
