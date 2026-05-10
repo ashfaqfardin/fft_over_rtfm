@@ -13,7 +13,7 @@ parser.add_argument('--gt', default='list/gt-ucf-local.npy', help='file of groun
 
 # Mac-safe / CPU-safe defaults
 parser.add_argument('--gpus', default=0, type=int, help='number of gpus to use')
-parser.add_argument('--lr', type=str, default='[0.001]*100', help='learning rates for steps(list form)')
+parser.add_argument('--lr', type=str, default='[0.0001]*100', help='learning rates for steps(list form)')
 parser.add_argument('--batch-size', type=int, default=32, help='number of instances in a batch of data')
 parser.add_argument('--workers', default=0, type=int, help='number of workers in dataloader')
 

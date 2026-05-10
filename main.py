@@ -72,17 +72,15 @@ if __name__ == '__main__':
         optimizer = optim.Adam(model.parameters(),
                                lr=config.lr[0], weight_decay=0.005)
 
-    # Linear warmup for the first `warmup_epochs` steps, then cosine decay.
-    # Warmup prevents large destructive updates on the first steps, which is
-    # the main cause of the AUC dropping immediately after training starts.
+    # Linear warmup then fixed LR — matches RTFM / MGFN / MIST convention.
+    # These papers all use Adam with a constant LR on pre-extracted I3D features;
+    # cosine decay is unnecessary and drives the LR to zero before training ends.
     def lr_lambda(step):
         if step < args.warmup_epochs:
             return (step + 1) / args.warmup_epochs   # 0 → 1 linearly
-        return 1.0                                    # cosine scheduler takes over
+        return 1.0                                    # hold at base LR
 
-    warmup_scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
-    cosine_scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=max(1, args.max_epoch - args.warmup_epochs), eta_min=1e-6)
+    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
     # Build loss function once — not per-step — so any future stateful losses
     # retain their parameters across training steps.
@@ -114,11 +112,7 @@ if __name__ == '__main__':
               pseudo_threshold=args.pseudo_threshold,
               grad_clip=args.grad_clip)
 
-        # Warmup phase: ramp LR linearly; after warmup: cosine decay
-        if step <= args.warmup_epochs:
-            warmup_scheduler.step()
-        else:
-            cosine_scheduler.step()
+        scheduler.step()
 
         auc, pr_auc, fpr, tpr, precision, recall, _ = test(test_loader, model, args, viz, device)
         test_info["epoch"].append(step)
