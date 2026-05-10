@@ -22,25 +22,37 @@ class TemporalDFFN(nn.Module):
     """
     Complex-valued temporal spectral filter for RTFM's PDC branch outputs.
 
-    v4 — literature-grounded redesign:
+    v5 — two improvements over v4, each grounded in recent literature:
 
-    FEDformer (ICML 2022) showed that frequency-domain weights should be
-    complex-valued (torch.cfloat), capturing both amplitude AND phase.
-    Phase shifts let the filter model temporal offsets between channels —
-    impossible with real-only scaling.  FEDformer also proved that diverse
-    mode coverage (all bins, not just low-pass) outperforms low-pass only.
+    [1] Per-bin frequency gate (bin_gate):
+        A learned real-valued scalar per frequency bin, shared across all
+        channels (shape 1×1×n_bins, init 0 → scale 1.0).  This is distinct
+        from W_quant (which is per-channel complex): bin_gate encodes a
+        task-level frequency-band prior — e.g., the model can learn to
+        up-weight high-frequency bins where abrupt anomalous events manifest.
+        Conceptually similar to FEDformer's (ICML 2022) frequency mode
+        selection, but continuous and differentiable.
+        Parameters: n_bins = 17.
 
-    AFNO (ICLR 2022) showed that applying the filter to the COMBINED
-    multi-scale output (all dilation branches together) captures cross-branch
-    frequency correlations that per-branch filters miss.  This module is
-    therefore instantiated ONCE on the 1536-channel concatenated PDC output
-    in Aggregate, not three times on individual 512-channel branches.
+    [2] Input-conditioned dynamic gate (dyn_gate):
+        Global temporal average of x → Linear(C, n_bins, bias=False) →
+        per-video per-bin correction added on top of bin_gate.
+        Zero-init weights → zero contribution at init → exact identity.
+        Makes the filter adaptive: a robbery video and a normal walking
+        video can now emphasise different frequency bands automatically.
+        Inspired by SE-Net's (CVPR 2018) squeeze-and-excitation attention
+        and AFNO's (ICLR 2022) input-adaptive Fourier token mixing.
+        Parameters: C × n_bins  (e.g., 1536×17 = 26 112 for Mod 1).
 
-    Parameterisation — complex delta filter:
-        W = 1 + ΔW,  where ΔW = W_quant[...,0] + j·W_quant[...,1]
-    Init: W_quant=0 → ΔW=0+0j → W=1+0j → EXACT identity, gradient flows
-    from step 0.  Weight decay (wd=1e-3 in main.py) pulls ΔW back toward 0
-    (identity), regularising the filter against spectral overfitting.
+    Combined gate: gate = 1 + bin_gate + dyn_gate(avg(x))
+        Starts at exactly 1.0 for every video.  Multiplies the complex xf
+        after W is applied, so both amplitude and phase from W_quant are
+        preserved — the gate only modulates per-bin energy.
+
+    All v4 design principles are preserved:
+      - Complex W_quant, identity init, wd=1e-3 in spectral optimizer group.
+      - Applied post-concat (1536 ch): cross-dilation interactions (AFNO).
+      - Full bin coverage (n_bins=17 for T=32): diverse mode learning.
 
     Args:
         channels  (int): input channels — 1536 for concatenated PDC output.
@@ -54,34 +66,53 @@ class TemporalDFFN(nn.Module):
         self.n_bins = n_bins
 
         # Complex delta: W_quant[..., 0]=real_delta, W_quant[..., 1]=imag_delta.
-        # All zeros init → ΔW=0+0j → W=1+0j → identity.
-        # Named W_quant so main.py optimizer treatment (lr×2, wd=1e-3) applies.
+        # All zeros → ΔW=0+0j → W=1+0j → identity.
+        # In spectral optimizer group: lr×2, wd=1e-3 (see main.py).
         self.W_quant = nn.Parameter(torch.zeros(1, channels, n_bins, 2))
+
+        # [1] Per-bin static frequency gate — shared across channels.
+        # bin_gate=0 → scale = 1.0+0.0 = 1.0 → identity.
+        # In spectral optimizer group alongside W_quant.
+        self.bin_gate = nn.Parameter(torch.zeros(1, 1, n_bins))
+
+        # [2] Input-conditioned dynamic gate: global context → per-bin delta.
+        # Zero-init weights → dyn contribution = 0 at init → exact identity.
+        # In other_params group (standard lr, wd=0.005).
+        self.dyn_gate = nn.Linear(channels, n_bins, bias=False)
+        nn.init.zeros_(self.dyn_gate.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
             x: (B, C, T)
         Returns:
-            (B, C, T) — exact identity when W_quant=0
+            (B, C, T) — exact identity when all parameters are at init values
         """
         B, C, T = x.shape
         actual_bins = T // 2 + 1
-        n = min(self.n_bins, actual_bins)   # bins covered by the learned filter
+        n = min(self.n_bins, actual_bins)
 
-        xf = fft.rfft(x, dim=2)            # (B, C, actual_bins) complex
+        xf = fft.rfft(x, dim=2)             # (B, C, actual_bins) complex
 
-        # Complex filter W = 1 + ΔW (identity at init, regularised by wd)
+        # Per-channel complex filter: W = 1 + ΔW  (identity at init)
         W_delta = torch.view_as_complex(
             self.W_quant[:, :, :n, :].contiguous()
-        )                                   # (1, C, n) complex
-        W = 1.0 + W_delta                   # (1, C, n) complex — W=1+0j at init
+        )                                    # (1, C, n) complex
+        W = 1.0 + W_delta                    # (1, C, n)
 
-        # Apply filter to the first n bins; high bins pass through unchanged.
-        # torch.cat with an empty tensor is a no-op when n == actual_bins.
-        xf_out = torch.cat([xf[:, :, :n] * W, xf[:, :, n:]], dim=2)
+        # Combined real frequency gate — starts at 1.0, adapts during training.
+        # [1] Static per-bin term: shape (1, 1, n)
+        # [2] Dynamic per-video term: avg(x) → Linear → (B, n_bins) → (B, 1, n)
+        ctx = x.mean(dim=2)                  # (B, C) global temporal average
+        dyn = self.dyn_gate(ctx).unsqueeze(1)  # (B, 1, n_bins)
+        gate = (1.0 + self.bin_gate + dyn)[:, :, :n]  # (B, 1, n)
 
-        return fft.irfft(xf_out, n=T, dim=2)   # (B, C, T)
+        # Apply complex filter then real gate; pass high bins unchanged.
+        xf_out = torch.cat(
+            [xf[:, :, :n] * W * gate, xf[:, :, n:]], dim=2
+        )
+
+        return fft.irfft(xf_out, n=T, dim=2)  # (B, C, T)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
