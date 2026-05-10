@@ -197,10 +197,19 @@ class TemporalFSAS(nn.Module):
 
 def freq_magnitude(features: torch.Tensor) -> torch.Tensor:
     """
-    Frequency-domain replacement for RTFM's per-snippet L2 magnitude.
+    Temporal-deviation magnitude: per-snippet L2 distance from the video's mean feature.
 
-    Replaces:
-        feat_magnitudes = torch.norm(features, p=2, dim=2)
+    Replaces both:
+        feat_magnitudes = torch.norm(features, p=2, dim=2)   # absolute — scene-biased
+    and the previous rfft→irfft→norm form, which was a no-op by Parseval's theorem
+    (irfft(rfft(x)) == x exactly, so the norm was unchanged).
+
+    The 76% of UCF-Crime anomaly events that are shorter than one T=32 window appear
+    as *local* spikes inside mostly-normal sequences.  Absolute L2 norm picks the
+    highest-energy snippet regardless of context; deviation magnitude picks the snippet
+    that deviates most from the video's own temporal average — precisely what anomaly
+    detection requires.  The scene-level mean activation is absorbed into `baseline`,
+    so high-motion normal scenes no longer inflate the top-k selection.
 
     Args:
         features: (N, T, F)  where N = B * ncrops, T = 32, F = 2048
@@ -208,9 +217,9 @@ def freq_magnitude(features: torch.Tensor) -> torch.Tensor:
     Returns:
         magnitudes: (N, T)  — same shape as torch.norm(features, p=2, dim=2)
     """
-    Xf    = fft.rfft(features, dim=2)                      # (N, T, F//2+1) complex
-    X_rec = fft.irfft(Xf, n=features.shape[2], dim=2)      # (N, T, F) real
-    return X_rec.norm(p=2, dim=2)                           # (N, T)
+    baseline  = features.mean(dim=1, keepdim=True)   # (N, 1, F) — video temporal mean
+    deviation = features - baseline                   # (N, T, F) — per-snippet deviation
+    return deviation.norm(p=2, dim=2)                 # (N, T)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
