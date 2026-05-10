@@ -19,6 +19,14 @@ def smooth(arr, lamda1, gate_thresh=0.3):
     return lamda1 * torch.sum(gate * diff ** 2)
 
 
+def smooth_per_video(arr_2d, lamda1, gate_thresh=0.3):
+    # Correct per-video smoothness: arr_2d is (B, T).
+    # Each row is one video — no cross-video boundary penalties.
+    diff = arr_2d[:, 1:] - arr_2d[:, :-1]                 # (B, T-1)
+    gate = torch.sigmoid(gate_thresh - torch.abs(diff).detach())
+    return lamda1 * torch.sum(gate * diff ** 2)
+
+
 def l1_penalty(var):
     return torch.mean(torch.norm(var, dim=0))
 
@@ -172,8 +180,9 @@ _LOSS_REGISTRY = {
 
 
 def train(nloader, aloader, model, batch_size, optimizer, viz, device,
-          loss_name='rtfm', smooth_weight=8e-4, sparse_weight=8e-3,
-          pseudo_weight=0.0, pseudo_threshold=0.8):
+          loss_fn, smooth_weight=8e-4, sparse_weight=8e-3,
+          pseudo_weight=0.0, pseudo_threshold=0.8,
+          grad_clip=1.0):
     with torch.set_grad_enabled(True):
         model.train()
 
@@ -185,18 +194,21 @@ def train(nloader, aloader, model, batch_size, optimizer, viz, device,
         score_abnormal, score_normal, feat_select_abn, feat_select_normal, feat_abn_bottom, \
         feat_normal_bottom, scores, scores_nor_bottom, scores_nor_abn_bag, _ = model(input)
 
-        # Save per-video scores (B*2, T, 1) before flattening for pseudo-labels
+        # scores_per_video: (B_nor + B_abn, T, 1) — kept before flattening
         scores_per_video = scores
 
-        scores    = scores.view(batch_size * 32 * 2, -1).squeeze()
+        scores     = scores.view(batch_size * 32 * 2, -1).squeeze()
         abn_scores = scores[batch_size * 32:]
 
         nlabel = nlabel[0:batch_size]
         alabel = alabel[0:batch_size]
 
-        loss_fn     = _LOSS_REGISTRY[loss_name]().to(device)
-        loss_sparse = sparsity(abn_scores, batch_size, sparse_weight)
-        loss_smooth = smooth(abn_scores, smooth_weight)
+        # Bug fix: compute smoothness per-video (not across concatenated videos).
+        # scores_per_video[batch_size:] are the abnormal videos, shape (B_abn, T, 1).
+        abn_scores_2d = scores_per_video[batch_size:, :, 0]   # (B_abn, T)
+        loss_sparse   = sparsity(abn_scores, batch_size, sparse_weight)
+        loss_smooth   = smooth_per_video(abn_scores_2d, smooth_weight)
+
         cost = (loss_fn(score_normal, score_abnormal, nlabel, alabel,
                         feat_select_normal, feat_select_abn)
                 + loss_smooth + loss_sparse)
@@ -204,16 +216,14 @@ def train(nloader, aloader, model, batch_size, optimizer, viz, device,
         # Pseudo-label self-training (MIST, CVPR 2021) — active when pseudo_weight > 0
         # After warmup, high-confidence snippet predictions are used as extra supervision.
         if pseudo_weight > 0.0:
-            # scores_per_video: (B_nor + B_abn, T, 1); normal videos are first half
-            abn_s = scores_per_video[batch_size:, :, 0]   # (B, T)
-            nor_s = scores_per_video[:batch_size, :, 0]   # (B, T)
+            nor_s = scores_per_video[:batch_size, :, 0]    # (B_nor, T)
             with torch.no_grad():
-                abn_mask = abn_s > pseudo_threshold
+                abn_mask = abn_scores_2d > pseudo_threshold
                 nor_mask = nor_s < (1.0 - pseudo_threshold)
             loss_pseudo = torch.tensor(0.0, device=device)
             if abn_mask.any():
                 loss_pseudo = loss_pseudo + F.binary_cross_entropy(
-                    abn_s[abn_mask], torch.ones(abn_mask.sum(), device=device)
+                    abn_scores_2d[abn_mask], torch.ones(abn_mask.sum(), device=device)
                 )
             if nor_mask.any():
                 loss_pseudo = loss_pseudo + F.binary_cross_entropy(
@@ -226,4 +236,6 @@ def train(nloader, aloader, model, batch_size, optimizer, viz, device,
         viz.plot_lines('sparsity loss', loss_sparse.item())
         optimizer.zero_grad()
         cost.backward()
+        # Gradient clipping prevents large spikes from the margin=100 magnitude term.
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
         optimizer.step()

@@ -5,7 +5,7 @@ import numpy as np
 from utils import save_best_record
 from model import Model
 from dataset import Dataset
-from train import train
+from train import train, _LOSS_REGISTRY
 from test_10crop import test
 import option
 from tqdm import tqdm
@@ -75,6 +75,10 @@ if __name__ == '__main__':
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.max_epoch, eta_min=1e-6)
 
+    # Build loss function once — not per-step — so any future stateful losses
+    # retain their parameters across training steps.
+    loss_fn = _LOSS_REGISTRY[args.loss]().to(device)
+
     test_info = {"epoch": [], "test_AUC": [], "test_PR_AUC": []}
     best_AUC = -1
     output_path = ''   # put your own path here
@@ -94,7 +98,7 @@ if __name__ == '__main__':
         # Pseudo-label loss activates only after warmup epochs (MIST, CVPR 2021)
         pseudo_w = args.pseudo_weight if step > args.pseudo_warmup else 0.0
         train(loadern_iter, loadera_iter, model, args.batch_size, optimizer, viz, device,
-              loss_name=args.loss,
+              loss_fn=loss_fn,
               smooth_weight=args.smooth_weight,
               sparse_weight=args.sparse_weight,
               pseudo_weight=pseudo_w,
