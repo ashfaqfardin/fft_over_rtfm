@@ -221,7 +221,7 @@ _LOSS_REGISTRY = {
     'focal':       lambda: FocalBCELoss(alpha=0.0001, margin=100, gamma=2.0),
     'contrastive': lambda: ContrastiveLoss(alpha=1.0, margin=0.5),
     'mgfn':        lambda: MGFNMagnitudeLoss(alpha=0.0001, margin=100, mc_weight=0.1),
-    'deviation':   lambda: DeviationMIL_loss(alpha=0.1, margin=1.0),
+    'deviation':   lambda: DeviationMIL_loss(alpha=0.01, margin=0.5),
 }
 
 
