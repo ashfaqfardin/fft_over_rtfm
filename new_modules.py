@@ -197,29 +197,17 @@ class TemporalFSAS(nn.Module):
 
 def freq_magnitude(features: torch.Tensor) -> torch.Tensor:
     """
-    High-pass temporal residual magnitude for anomaly-aware snippet scoring.
+    Deviation magnitude — L2 norm of each snippet's deviation from the video mean.
 
-    KEY DESIGN DECISION — axis choice:
-        FFT must be applied over the TEMPORAL axis (dim=1, T=32), NOT the feature
-        axis (dim=2, F=2048).  Feature dimensions are unordered learned I3D
-        representations; their FFT phase is noise.  The temporal axis has natural
-        causal ordering, so its FFT has physical meaning.
+    NOT called directly from model.py when Mod 3 is active (the deviation
+    features and their magnitudes are computed together in Model.forward to
+    avoid computing the temporal mean twice).  Kept here for reference and
+    standalone testing.
 
-    INTUITION:
-        Normal activities (walking, driving, eating) produce smooth, slowly-varying
-        temporal feature sequences → energy concentrated in LOW temporal frequencies.
-        Anomalous events (assault, explosion, robbery) cause abrupt feature-space
-        discontinuities → energy concentrated in HIGH temporal frequencies.
-
-        Low-pass filtering the temporal sequence gives a smooth baseline that tracks
-        gradual scene changes.  Subtracting it leaves the high-frequency residual —
-        exactly the signal that betrays sudden anomalous events.
-
-    PARAMETERS:
-        K = T // 8 = 4 bins for T=32.  Bins 0..3 cover temporal periods of
-        32, 16, 10, 8 segments respectively.  Removing them eliminates very slow
-        drift (DC, camera pan, lighting change) while keeping events that last
-        1–7 segments — the typical UCF-Crime anomaly duration.
+    Must be paired with --loss deviation (DeviationMIL_loss) so that the
+    selection criterion and the loss term both operate on deviation features.
+    Using this with --loss rtfm creates a destructive feedback loop where the
+    loss pushes wrong snippets toward high absolute L2 norm.
 
     Args:
         features: (N, T, F)  where N = B * ncrops, T = 32, F = 2048
@@ -227,20 +215,9 @@ def freq_magnitude(features: torch.Tensor) -> torch.Tensor:
     Returns:
         (N, T)  — same shape as torch.norm(features, p=2, dim=2)
     """
-    N, T, F = features.shape
-
-    # FFT over the temporal axis — physically meaningful ordering
-    Xf = fft.rfft(features, dim=1)              # (N, T//2+1, F) complex
-
-    # Reconstruct the slow-varying baseline from DC + K-1 low freq bins only
-    K = max(2, T // 8)                          # 4 bins for T=32
-    Xf_low = torch.zeros_like(Xf)
-    Xf_low[:, :K, :] = Xf[:, :K, :]            # keep only low-freq components
-
-    baseline = fft.irfft(Xf_low, n=T, dim=1)   # (N, T, F) smooth temporal baseline
-    residual  = features - baseline              # (N, T, F) high-freq anomaly signal
-
-    return residual.norm(p=2, dim=2)             # (N, T)
+    baseline  = features.mean(dim=1, keepdim=True)   # (N, 1, F) video temporal mean
+    deviation = features - baseline                   # (N, T, F)
+    return deviation.norm(p=2, dim=2)                 # (N, T)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

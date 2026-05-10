@@ -30,10 +30,11 @@ parser.add_argument('--mod', default='', type=str,
                          '5=GlanceFocus (MGFN AAAI-23) '
                          '(e.g. --mod 1,2 or --mod 1,2,3,4,5)')
 parser.add_argument('--loss', default='rtfm',
-                    choices=['rtfm', 'ranking', 'focal', 'contrastive', 'mgfn'],
+                    choices=['rtfm', 'ranking', 'focal', 'contrastive', 'mgfn', 'deviation'],
                     help='loss function: rtfm (default) | ranking (Sultani MIL hinge) | '
                          'focal (Focal-BCE) | contrastive (cosine-margin) | '
-                         'mgfn (magnitude contrastive, AAAI-23)')
+                         'mgfn (magnitude contrastive, AAAI-23) | '
+                         'deviation (scale-invariant hinge, must pair with --mod 3)')
 parser.add_argument('--smooth-weight', type=float, default=8e-4,
                     help='temporal smoothness regulariser weight (default: 8e-4)')
 parser.add_argument('--sparse-weight', type=float, default=8e-3,

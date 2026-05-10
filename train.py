@@ -170,12 +170,58 @@ class MGFNMagnitudeLoss(nn.Module):
         return loss_cls + self.alpha * loss_rtfm + self.mc_weight * loss_mc
 
 
+# ── Loss 6: Deviation MIL — co-designed for --mod 3 ─────────────────────────
+class DeviationMIL_loss(nn.Module):
+    """Co-designed loss for --mod 3 deviation features.
+
+    Model.forward passes deviation features (feat - temporal_mean) as feat_n/feat_a
+    when Mod 3 is active.  This loss ranks them with a scale-invariant hinge:
+
+        relu(margin - (||dev_abn|| - ||dev_nor||))
+
+    This directly optimises the gap between the deviation magnitudes of selected
+    abnormal and normal snippets, without assuming any absolute scale.
+
+    Do NOT use this loss without --mod 3: when model.py passes raw features,
+    the hinge margin of 1.0 may be too small relative to absolute L2 norms (~7-10).
+    Do NOT use --loss rtfm with --mod 3: that loss measures absolute L2 norm but
+    selection uses deviation magnitude — the two are misaligned.
+
+    Args:
+        alpha  (float): weight of the deviation hinge term.  Default 0.1.
+        margin (float): minimum required gap between abnormal and normal deviation
+                        magnitudes.  Default 1.0 — chosen relative to typical
+                        deviation norms (~0.5–3.0 for I3D post-Aggregate features).
+    """
+    def __init__(self, alpha: float = 0.1, margin: float = 1.0):
+        super().__init__()
+        self.alpha     = alpha
+        self.margin    = margin
+        self.criterion = nn.BCELoss()
+
+    def forward(self, score_normal, score_abnormal, nlabel, alabel, feat_n, feat_a):
+        label = torch.cat((nlabel, alabel), 0)
+        score = torch.cat((score_normal, score_abnormal), 0).squeeze()
+        loss_cls = self.criterion(score, label.to(score.device))
+
+        # Deviation magnitude of the selected snippet centroids
+        mag_abn = feat_a.mean(dim=1).norm(p=2, dim=1)   # (B,)
+        mag_nor = feat_n.mean(dim=1).norm(p=2, dim=1)   # (B,)
+
+        # Hinge: abnormal deviation must exceed normal deviation by at least margin.
+        # Scale-invariant — works regardless of absolute feature magnitude.
+        loss_dev = F.relu(self.margin - (mag_abn - mag_nor)).mean()
+
+        return loss_cls + self.alpha * loss_dev
+
+
 _LOSS_REGISTRY = {
     'rtfm':        lambda: RTFM_loss(alpha=0.0001, margin=100),
     'ranking':     lambda: RankingLoss(margin=1.0),
     'focal':       lambda: FocalBCELoss(alpha=0.0001, margin=100, gamma=2.0),
     'contrastive': lambda: ContrastiveLoss(alpha=1.0, margin=0.5),
     'mgfn':        lambda: MGFNMagnitudeLoss(alpha=0.0001, margin=100, mc_weight=0.1),
+    'deviation':   lambda: DeviationMIL_loss(alpha=0.1, margin=1.0),
 }
 
 

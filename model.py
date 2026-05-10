@@ -251,16 +251,23 @@ class Model(nn.Module):
         scores = scores.view(bs, ncrops, -1).mean(1)   # (B, T)
         scores = scores.unsqueeze(dim=2)               # (B, T, 1)
 
-        normal_features   = features[0:self.batch_size * 10]
-        normal_scores     = scores[0:self.batch_size]
-        abnormal_features = features[self.batch_size * 10:]
-        abnormal_scores   = scores[self.batch_size:]
-
-        # Mod 3: frequency-domain feature magnitude; otherwise standard L2 norm
+        # Mod 3 co-design: deviation features for BOTH selection and loss gathering.
+        # Selection criterion and loss ranking term must measure the same quantity.
+        # When Mod 3 is active, both use deviation from the video's temporal mean.
+        # Pair with --loss deviation (DeviationMIL_loss) for a consistent signal.
+        # Score head always uses raw features — deviation is not anomaly probability.
         if 3 in self.active_mods:
-            feat_magnitudes = freq_magnitude(features)
+            feat_baseline   = features.mean(dim=1, keepdim=True)   # (N, 1, F)
+            loss_features   = features - feat_baseline              # (N, T, F)
+            feat_magnitudes = loss_features.norm(p=2, dim=2)        # (N, T)
         else:
+            loss_features   = features
             feat_magnitudes = torch.norm(features, p=2, dim=2)
+
+        normal_features   = loss_features[0:self.batch_size * 10]
+        normal_scores     = scores[0:self.batch_size]
+        abnormal_features = loss_features[self.batch_size * 10:]
+        abnormal_scores   = scores[self.batch_size:]
 
         feat_magnitudes  = feat_magnitudes.view(bs, ncrops, -1).mean(1)
         nfea_magnitudes  = feat_magnitudes[0:self.batch_size]
