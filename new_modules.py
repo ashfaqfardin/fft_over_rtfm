@@ -130,20 +130,27 @@ class TemporalFSAS(nn.Module):
             (B, C, T)
         """
         T = x.shape[2]
+        inner = self.proj_q.out_channels
+        scale = inner ** -0.5   # temperature: same role as /sqrt(d_k) in attention
 
-        q = self.proj_q(x)     # (B, inner, T)
+        q = self.proj_q(x) * scale  # (B, inner, T)
         k = self.proj_k(x)
         v = self.proj_v(x)
 
-        # Frequency-domain cross-correlation: IFFT(FFT(Q) * conj(FFT(K)))
-        # Captures lag-based temporal dependencies missed by dot-product attention.
-        Fq = fft.rfft(q, dim=2)
+        Fq = fft.rfft(q, dim=2)     # (B, inner, n_bins) complex
         Fk = fft.rfft(k, dim=2)
-        A_freq = Fq * torch.conj(Fk)
-        A = fft.irfft(A_freq, n=T, dim=2)   # (B, inner, T)  real
+        Fv = fft.rfft(v, dim=2)
 
-        A = self.attn_norm(A)
-        attended = A * v                     # (B, inner, T)
+        # Correct FSAS (FFTFormer, CVPR 2023):
+        #   Attended = IFFT( FFT(Q) ⊙ conj(FFT(K)) ⊙ FFT(V) )
+        # All three stay in frequency domain — equivalent to circular
+        # convolution-attention: (Q⋆K) * V  (cross-corr weighted sum of V).
+        # The original bug converted A to time domain before multiplying V,
+        # giving A[t]*V[t] (elementwise scale) instead of Σ_τ A[τ]·V[t-τ].
+        attended_freq = Fq * torch.conj(Fk) * Fv   # (B, inner, n_bins) complex
+        attended = fft.irfft(attended_freq, n=T, dim=2)  # (B, inner, T) real
+
+        attended = self.attn_norm(attended)
 
         out = self.W(attended)               # (B, C, T)
         return out + x
