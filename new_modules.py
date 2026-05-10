@@ -197,29 +197,56 @@ class TemporalFSAS(nn.Module):
 
 def freq_magnitude(features: torch.Tensor) -> torch.Tensor:
     """
-    Temporal-deviation magnitude: per-snippet L2 distance from the video's mean feature.
+    Combined magnitude-deviation + phase-deviation anomaly score.
 
-    Replaces both:
-        feat_magnitudes = torch.norm(features, p=2, dim=2)   # absolute — scene-biased
-    and the previous rfft→irfft→norm form, which was a no-op by Parseval's theorem
-    (irfft(rfft(x)) == x exactly, so the norm was unchanged).
+    Two complementary signals are averaged:
 
-    The 76% of UCF-Crime anomaly events that are shorter than one T=32 window appear
-    as *local* spikes inside mostly-normal sequences.  Absolute L2 norm picks the
-    highest-energy snippet regardless of context; deviation magnitude picks the snippet
-    that deviates most from the video's own temporal average — precisely what anomaly
-    detection requires.  The scene-level mean activation is absorbed into `baseline`,
-    so high-motion normal scenes no longer inflate the top-k selection.
+    1. Magnitude deviation — per-snippet L2 distance from the video's temporal mean.
+       Captures energy-level anomalies (high-activity events relative to video context).
+       Scene-level bias is removed because the mean absorbs global activation scale.
+
+    2. Phase deviation — mean absolute circular phase shift from the video's mean phase.
+       The FFT over F decomposes each snippet's feature vector into spectral components;
+       the phase of each component encodes the structural pattern of the feature
+       distribution.  Normal activities evolve slowly → small phase shifts.
+       Anomalous events cause abrupt structural breaks → sudden phase jumps.
+       Phase is energy-invariant: a loud but normal event (sports crowd) has high
+       magnitude but consistent phase; a true anomaly shows a phase discontinuity
+       even when its energy is moderate.
+
+    Why atan2(sin, cos) for circular wrapping:
+       Naive subtraction φ_t − φ_mean can overflow at ±π boundaries (e.g., +3.1 − −3.1
+       gives 6.2 instead of the correct ~0.2).  atan2(sin(Δ), cos(Δ)) maps any Δ back
+       to [−π, π] correctly.
 
     Args:
         features: (N, T, F)  where N = B * ncrops, T = 32, F = 2048
 
     Returns:
-        magnitudes: (N, T)  — same shape as torch.norm(features, p=2, dim=2)
+        (N, T)  — same shape as torch.norm(features, p=2, dim=2)
     """
-    baseline  = features.mean(dim=1, keepdim=True)   # (N, 1, F) — video temporal mean
-    deviation = features - baseline                   # (N, T, F) — per-snippet deviation
-    return deviation.norm(p=2, dim=2)                 # (N, T)
+    # ── 1. Magnitude deviation ────────────────────────────────────────────────
+    baseline  = features.mean(dim=1, keepdim=True)        # (N, 1, F)
+    mag_score = (features - baseline).norm(p=2, dim=2)    # (N, T)
+
+    # ── 2. Phase deviation ────────────────────────────────────────────────────
+    Xf         = fft.rfft(features, dim=2)                # (N, T, F//2+1) complex
+    phase      = torch.angle(Xf)                          # (N, T, F//2+1) in [−π, π]
+    mean_phase = phase.mean(dim=1, keepdim=True)          # (N, 1, F//2+1)
+    diff       = phase - mean_phase                       # (N, T, F//2+1)
+    diff       = torch.atan2(torch.sin(diff),
+                             torch.cos(diff))             # circular wrap to [−π, π]
+    phase_score = diff.abs().mean(dim=2)                  # (N, T)
+
+    # ── 3. Normalise each score to [0,1] within the video, then combine ─────
+    # Without normalisation mag_score (L2 over F=2048 dims, values ~10–100) would
+    # drown out phase_score (mean absolute angle, values in [0, π]).
+    def _norm(s):
+        mn = s.min(dim=1, keepdim=True).values
+        mx = s.max(dim=1, keepdim=True).values
+        return (s - mn) / (mx - mn + 1e-8)          # (N, T) in [0, 1]
+
+    return 0.5 * _norm(mag_score) + 0.5 * _norm(phase_score)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
